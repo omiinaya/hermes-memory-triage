@@ -47,6 +47,8 @@ class Config:
     data_dir: Path = field(default_factory=lambda: _default_data_dir())
 
     def __post_init__(self) -> None:
+        # data_dir may arrive as a str (manual/CLI construction); normalize it.
+        self.data_dir = Path(os.path.expanduser(str(self.data_dir)))
         if self.mode not in VALID_MODES:
             raise ValueError(
                 f"mode must be one of {VALID_MODES!r}, got {self.mode!r}"

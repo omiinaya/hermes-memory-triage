@@ -65,6 +65,12 @@ def test_to_dict_contains_data_dir(tmp_path):
     assert d["mode"] == "manual"
 
 
+def test_data_dir_str_is_coerced_to_path(tmp_path):
+    cfg = Config(data_dir=str(tmp_path))
+    assert isinstance(cfg.data_dir, type(tmp_path))
+    assert cfg.quarantine_dir == tmp_path / "quarantine"
+
+
 def test_data_dir_env_override(monkeypatch, tmp_path):
     monkeypatch.setenv("MEMTRIAGE_HOME", str(tmp_path / "alt"))
     from memtriage.config import _default_data_dir
