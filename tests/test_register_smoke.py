@@ -62,3 +62,30 @@ def test_post_tool_call_ignores_non_memory_tools():
 
 def test_post_tool_call_readonly_memory_call_is_noop():
     plugin._on_post_tool_call(tool_name="memory", status="ok", args={"action": ""})
+
+
+def test_auto_triage_skips_when_plan_awaits_approval(tmp_path, monkeypatch):
+    """A queued manual-mode plan must never be stomped by auto-triage."""
+    from memtriage import state as mt_state
+    from memtriage import store as memory_store
+    from memtriage.config import Config
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.setenv("MEMTRIAGE_HOME", str(tmp_path / "data"))
+    memory_store.write_entries("memory", ["x" * 2000])  # over 75%
+    cfg = Config(data_dir=tmp_path / "data")
+    mt_state.mark_awaiting_approval(cfg, "run-1")
+
+    called = {"n": 0}
+    original = plugin.run_triage
+
+    def boom(*args, **kwargs):
+        called["n"] += 1
+        raise AssertionError("auto-triage must not run while a plan awaits approval")
+
+    plugin.run_triage = boom
+    try:
+        plugin._maybe_run_triage("test")
+    finally:
+        plugin.run_triage = original
+    assert called["n"] == 0

@@ -96,6 +96,9 @@ def _maybe_run_triage(reason: str) -> None:
         return
     if state.cooldown_active(cfg):
         return
+    if state.awaiting_approval(cfg):
+        # A plan is already queued for review — never stomp it with a fresh one.
+        return
     try:
         run_triage(cfg, reason=reason, force=True)
     except Exception as exc:  # noqa: BLE001
