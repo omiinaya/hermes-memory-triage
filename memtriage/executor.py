@@ -12,11 +12,16 @@ Provider and cron delivery are best-effort: if the gateway is unreachable or a
 registration fails, the action is recorded as "pending" (visible in the report)
 rather than silently dropped.
 
-Routing actions (route-to-skill/profile/provider/script) COPY the knowledge to
-its destination; to actually free the working store the SOURCE entry must be
-dropped afterward. That drop happens centrally in execute_plan so indices stay
-consistent with the original inventory. Every routed artifact is recorded in the
-ledger with provenance so Cerveau never re-routes it.
+Every routed artifact is recorded in the ledger with provenance so Cerveau
+never re-routes it.
+
+Index discipline: routing, evict and consolidate actions all reference the
+ORIGINAL inventory indices. The executor snapshots each target's entries once,
+resolves every removal against that snapshot, then rebuilds each target a single
+time at the end. An earlier removal can therefore never shift a later index, so
+multi-evict / multi-route runs are correct. Routing actions copy knowledge to
+its destination AND drop the source, so the working store actually shrinks —
+that is what makes the impact measurement meaningful.
 """
 
 from __future__ import annotations
@@ -25,11 +30,10 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 from . import ledger, quarantine, store as memory_store
 from .config import Config
-from .plan import ROUTING_KINDS
 
 SKILL_FRONTMATTER = """---
 name: {name}
@@ -65,7 +69,7 @@ def _make_executable(path: Path) -> None:
 
 
 def _dispatch_to_provider(cfg, text: str) -> str:
-    """Best-effort scene block write to the provider gateway. Returns notice."""
+    """Best-effort scene write to the provider gateway. Returns a notice."""
     url = cfg.provider_base_url.rstrip("/") + "/v3/atomic/update"
     payload = {"op": "upsert", "kind": "scene", "content": text}
     try:
@@ -99,8 +103,8 @@ def _register_cron(script_abs: str, schedule: str) -> str:
         return f"pending ({exc})"
 
 
-def _usage_snapshot(cfg: Config) -> Dict[str, Dict[str, Any]]:
-    """Per-target usage snapshot keyed by target name, plus percent-of-limit."""
+def _usage_snapshot() -> Dict[str, Dict[str, Any]]:
+    """Per-target usage snapshot keyed by target name."""
     snap: Dict[str, Dict[str, Any]] = {}
     for t in memory_store.TARGET_MEMORY, memory_store.TARGET_USER:
         u = memory_store.usage(t)
@@ -112,20 +116,6 @@ def _usage_snapshot(cfg: Config) -> Dict[str, Dict[str, Any]]:
     return snap
 
 
-def _collect_source_drops(plan) -> Dict[str, List[int]]:
-    """Routing source indices per target (indices reference the ORIGINAL inventory)."""
-    drops: Dict[str, List[int]] = {}
-    for a in plan:
-        kind = a.get("action")
-        if kind not in ROUTING_KINDS:
-            continue
-        idx = a.get("index")
-        if idx is None:
-            continue
-        drops.setdefault(a.get("target", "memory"), []).append(int(idx))
-    return drops
-
-
 class Executor:
     """Applies a plan; collects results into a report-friendly summary."""
 
@@ -135,6 +125,7 @@ class Executor:
         self.pending: List[str] = []
         self.errors: List[str] = []
         self._run_id = ""
+        self._provenance = ""
 
     def _note(self, msg: str) -> None:
         self.applied.append(msg)
@@ -142,34 +133,48 @@ class Executor:
     def _note_pending(self, msg: str) -> None:
         self.pending.append(msg)
 
+    def _ledger(self, kind: str, destination: str, summary: str) -> None:
+        ledger.record(
+            self.cfg, kind=kind, destination=destination,
+            summary=summary, run_id=self._run_id, provenance=self._provenance,
+        )
+
     def execute_plan(
-        self, plan: List[Dict[str, Any]], run_id: str, provenance: str
+        self, plan: List[Dict[str, Any]], run_id: str, provenance: str = ""
     ) -> Dict[str, Any]:
-        before = _usage_snapshot(self.cfg)
+        """Apply the plan and its routing/evict/consolidate removals."""
+        self._run_id = run_id
+        self._provenance = provenance
+        before = _usage_snapshot()
+
+        original: Dict[str, List[str]] = {
+            t: memory_store.read_entries(t)
+            for t in (memory_store.TARGET_MEMORY, memory_store.TARGET_USER)
+        }
+        removals: Dict[str, set] = {t: set() for t in original}    # idx -> drop
+        appends: Dict[str, List[str]] = {t: [] for t in original}  # new entries
 
         for n, action in enumerate(plan):
-            kind = action["action"]
             try:
-                self._apply(kind, action, provenance)
+                self._apply(action, original, removals, appends)
             except Exception as exc:  # noqa: BLE001
-                self.errors.append(f"action #{n} ({kind}): {exc}")
+                self.errors.append(
+                    f"action #{n} ({action.get('action')}): {exc}"
+                )
 
-        # Routing COPIED knowledge to its destination; now drop the source so the
-        # working store actually frees. Drop highest index first per target so a
-        # previous drop doesn't shift a later index in the same list.
-        for target, indices in _collect_source_drops(plan).items():
-            for idx in sorted(set(indices), reverse=True):
-                try:
-                    victim = _drop_index(target, idx)
-                    self.applied.append(
-                        f"freed source [{target}] ~{len(victim)} chars"
-                    )
-                except IndexError as exc:
-                    self.errors.append(
-                        f"free source [{target}]#{idx} failed: {exc}"
-                    )
+        # Rebuild each target once from the surviving originals + appends.
+        for target in original:
+            kept = [
+                e for i, e in enumerate(original[target])
+                if i not in removals[target]
+            ]
+            final = kept + appends[target]
+            if final != original[target]:
+                memory_store.write_entries(target, final)
+                freed = sum(len(original[target][i]) for i in removals[target])
+                self.applied.append(f"freed {freed} chars [{target}]")
 
-        after = _usage_snapshot(self.cfg)
+        after = _usage_snapshot()
         return {
             "applied": self.applied,
             "pending": self.pending,
@@ -180,93 +185,91 @@ class Executor:
 
     # -- per-action dispatch ---------------------------------------------
 
-    def _apply(self, kind: str, a: Dict[str, Any], provenance: str) -> None:
+    def _apply(self, a: Dict[str, Any], original, removals, appends) -> None:
+        kind = a["action"]
         target = a.get("target", "memory")
         if kind == "keep":
             return
         if kind == "consolidate":
-            self._do_consolidate(target, a, provenance)
+            self._do_consolidate(a, removals, appends)
             return
         if kind == "route-to-skill":
-            self._do_skill(a, provenance)
+            self._do_skill(a)
+            self._remove_source(removals, a)
             return
         if kind == "route-to-profile":
-            self._do_profile(a, provenance)
+            self._do_profile(a, appends)
+            self._remove_source(removals, a)
             return
         if kind == "route-to-provider":
-            self._do_provider(a, provenance)
+            self._do_provider(a)
+            self._remove_source(removals, a)
             return
         if kind == "route-to-script":
-            self._do_script(a, provenance)
+            self._do_script(a)
+            self._remove_source(removals, a)
             return
         if kind == "evict-to-quarantine":
-            self._do_evict(target, a)
+            self._do_evict(a, original, removals)
             return
         raise ValueError(f"unhandled action {kind!r}")
 
+    @staticmethod
+    def _remove_source(removals, a) -> None:
+        idx = a.get("index")
+        if idx is None:
+            return
+        target = a.get("target", "memory")
+        removals.setdefault(target, set()).add(int(idx))
+
     # -- action implementations ------------------------------------------
 
-    def _do_consolidate(self, target: str, a: Dict[str, Any], provenance: str) -> None:
+    def _do_consolidate(self, a, removals, appends) -> None:
+        target = a.get("target", "memory")
         idxs = [int(i) for i in (a.get("entries") or [])]
         merged = (a.get("text") or "").strip()
-        if not idxs or not merged:
-            raise ValueError("consolidate requires entries[] and text")
-        for i in sorted(idxs, reverse=True):
-            _drop_index(target, i)
-        _append_guarded(target, merged)
+        if len(idxs) < 2 or not merged:
+            raise ValueError("consolidate requires entries[] (>=2) and text")
+        removals[target].update(i for i in idxs)
+        appends[target].append(merged)
         self._note(f"consolidated {len(idxs)} entries into {len(merged)} chars [{target}]")
-        ledger.record(
-            self.cfg, kind="consolidate", destination=f"{target}#consolidated",
-            summary=merged[:60], run_id=self._run_id, provenance=provenance,
-        )
+        self._ledger("consolidate", f"{target}#consolidated", merged[:60])
 
-    def _do_skill(self, a: Dict[str, Any], provenance: str) -> None:
+    def _do_skill(self, a) -> None:
         name = a.get("skill_name") or a.get("name") or "routed-skill"
         body = (a.get("text") or a.get("body") or "").strip()
         if not body:
             raise ValueError("route-to-skill requires text")
         category = a.get("category") or "tools"
-        root = self.cfg.skills_root
-        target = root / _safe(category) / _safe(name) / "SKILL.md"
+        target = self.cfg.skills_root / _safe(category) / _safe(name) / "SKILL.md"
         description = body.splitlines()[0][:80]
         content = SKILL_FRONTMATTER.format(
-            name=_safe(name), description=description, provenance=provenance
+            name=_safe(name), description=description, provenance=self._provenance
         ) + body + "\n"
         _write_atomic(target, content)
         self._note(f"routed to skill '{name}' ({target})")
-        ledger.record(
-            self.cfg, kind="skill", destination=str(target),
-            summary=body[:200], run_id=self._run_id, provenance=provenance,
-        )
+        self._ledger("skill", str(target), body[:200])
 
-    def _do_profile(self, a: Dict[str, Any], provenance: str) -> None:
+    def _do_profile(self, a, appends) -> None:
         text = (a.get("text") or "").strip()
         if not text:
             raise ValueError("route-to-profile requires text")
-        _append_guarded("user", text)
+        appends["user"].append(text)
         self._note(f"routed to profile ({len(text)} chars)")
-        ledger.record(
-            self.cfg, kind="user", destination="USER.md",
-            summary=text[:200], run_id=self._run_id, provenance=provenance,
-        )
+        self._ledger("user", "USER.md", text[:200])
 
-    def _do_provider(self, a: Dict[str, Any], provenance: str) -> None:
+    def _do_provider(self, a) -> None:
         text = (a.get("text") or "").strip()
         if not text:
             raise ValueError("route-to-provider requires text")
         notice = _dispatch_to_provider(self.cfg, text)
         if notice.startswith("pending"):
-            # The source entry must still be freed from the working store even
-            # though the provider copy is pending (it is quarantined instead).
             self._note_pending(f"route-to-provider: {notice}")
         else:
             self._note(f"routed to provider (gateway {notice})")
-        ledger.record(
-            self.cfg, kind="provider", destination="provider/scene",
-            summary=text[:200], run_id=self._run_id, provenance=provenance,
-        )
+        self._ledger("provider", "provider/scene", text[:200])
 
-    def _do_script(self, a: Dict[str, Any], provenance: str) -> None:
+    def _do_script(self, a) -> None:
         script_name = a.get("script_name") or "routed-script"
         ext = (a.get("script_ext") or "py").lstrip(".").lower()
         body = (a.get("text") or "").strip()
@@ -285,38 +288,21 @@ class Executor:
                 self._note(f"registered cron for '{script_name}'")
             else:
                 self._note_pending(f"cron for '{script_name}': {result}")
-        ledger.record(
-            self.cfg, kind="script", destination=str(script_path),
-            summary=body[:200], run_id=self._run_id, provenance=provenance,
-        )
+        self._ledger("script", str(script_path), body[:200])
 
-    def _do_evict(self, target: str, a: Dict[str, Any]) -> None:
+    def _do_evict(self, a, original, removals) -> None:
+        target = a.get("target", "memory")
         index = a.get("index")
         if index is None:
             raise ValueError("evict-to-quarantine requires an index")
-        victim = _drop_index(target, int(index))
+        idx = int(index)
+        entries = original[target]
+        if idx < 0 or idx >= len(entries):
+            raise IndexError(f"source index {idx} out of range for target {target!r}")
+        victim_text = entries[idx]
         quarantine.evict(
-            self.cfg, target=target, text=victim,
+            self.cfg, target=target, text=victim_text,
             reason=a.get("reason", ""), run_id=self._run_id,
         )
-        self._note(f"quarantined {len(victim)} chars [{target}]")
-
-
-# -- store helpers ----------------------------------------------------------
-
-
-def _drop_index(target: str, idx: int) -> str:
-    """Remove the entry at ``idx`` and return its text."""
-    entries = memory_store.read_entries(target)
-    if idx < 0 or idx >= len(entries):
-        raise IndexError(f"source index {idx} out of range for target {target!r}")
-    victim = entries[idx]
-    kept = [e for i, e in enumerate(entries) if i != idx]
-    memory_store.write_entries(target, kept)
-    return victim
-
-
-def _append_guarded(target: str, text: str) -> None:
-    result = memory_store.append_entry(target, text)
-    if not result.get("success", False):
-        raise ValueError(result.get("error", "append failed"))
+        removals[target].add(idx)
+        self._note(f"quarantined {len(victim_text)} chars [{target}]")

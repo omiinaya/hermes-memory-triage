@@ -10,6 +10,10 @@ All notable changes to this project are documented here. Format based on
   the working store: after copying knowledge to its destination, the source
   entry is dropped from memory. Previously they only copied (ledger + write)
   and the store never shrank — so triage had no measurable impact.
+- Multi-removal runs (several evicts/consolidations/routes in one plan) no
+  longer error with "source index out of range": all removals are resolved
+  against the original inventory indices and each target is rebuilt once, so
+  an earlier drop can no longer shift a later index.
 
 ### Added
 - Execution summaries now report impact in percentage points: before/after
