@@ -38,6 +38,7 @@ def test_forced_triage_auto_executes(tmp_path, monkeypatch):
     assert result["execution"] == {"applied": [], "pending": [], "errors": []}
     assert state.awaiting_approval(cfg) is None
     assert state.last_triage_at(cfg) is not None
+    assert state.last_execution(cfg) is not None  # post-execution summary recorded
 
 
 def test_over_threshold_detection(tmp_path, monkeypatch):

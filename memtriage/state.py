@@ -98,3 +98,19 @@ def mark_notified(cfg: Config, run_id: str) -> None:
         runs.append(run_id)
     state["notified_runs"] = runs
     _save(cfg, state)
+
+
+def record_execution(cfg: Config, run_id: str, summary: Any) -> None:
+    """Persist the outcome of an applied plan (for post-execution notice)."""
+    st = _load(cfg)
+    st["last_execution"] = {
+        "run_id": run_id,
+        "summary": summary,
+        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    _save(cfg, st)
+
+
+def last_execution(cfg: Config) -> Optional[Dict[str, Any]]:
+    """The most recently applied plan's execution summary, if any."""
+    return _load(cfg).get("last_execution")

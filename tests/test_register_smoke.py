@@ -155,3 +155,42 @@ def test_session_start_surfaces_awaiting_plan_once(tmp_path, monkeypatch):
     assert len(ctx.injected) == 1  # surfaced once, not on every session start
     assert "run-7" in ctx.injected[0][1]
     assert "keep" in ctx.injected[0][1]
+
+
+def test_notify_execution_injects_what_it_did(tmp_path, monkeypatch):
+    """After a plan is applied, the summary of what it did is injected."""
+    from memtriage.config import Config
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.setenv("MEMTRIAGE_HOME", str(tmp_path / "data"))
+    cfg = Config(data_dir=tmp_path / "data")
+    state.record_execution(
+        cfg, "run-11",
+        {
+            "applied": ["routed to skill 'deploy' (path)", "evicted-to-quarantine 33 chars"],
+            "pending": ["cron for 'cleanup': pending (hermes cron add ...)"],
+            "errors": [],
+        },
+    )
+    ctx = MockCtx()
+    plugin._ctx = ctx
+    try:
+        plugin._notify_execution(cfg)
+    finally:
+        plugin._ctx = None
+    assert len(ctx.injected) == 1
+    content = ctx.injected[0][1]
+    assert "run-11" in content
+    assert "2 applied action(s)" in content
+    assert "routed to skill 'deploy'" in content
+    assert "pending" in content
+    assert "memory" in content  # post-execution usage shown
+
+
+def test_render_execution_flat():
+    block = plugin._render_execution(
+        {"applied": ["a"], "pending": ["p"], "errors": []}
+    )
+    assert "1 applied action(s)" in block
+    assert "+ a" in block
+    assert "pending" in block

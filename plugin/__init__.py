@@ -158,9 +158,7 @@ def _notify_result(result: Dict[str, Any]) -> None:
         f"[memtriage] {mode} triage {run_id} finished — {len(plan)} action(s).\n"
     )
     if execution:
-        applied = len(execution.get("applied", []))
-        pending = len(execution.get("pending", []))
-        head += f"Applied {applied} action(s), {pending} pending."
+        head += _render_execution(execution)
     else:
         head += (
             "Nothing applied yet — review and approve, or edit the plan "
@@ -170,6 +168,45 @@ def _notify_result(result: Dict[str, Any]) -> None:
     _inject(head + body)
     if run_id:
         state.mark_notified(_load_cfg(), run_id)
+
+
+def _render_execution(execution: Dict[str, Any]) -> str:
+    """Render a compact 'what it did' block from an executor summary."""
+    applied = execution.get("applied", [])
+    pending = execution.get("pending", [])
+    errors = execution.get("errors", [])
+    lines = [_plural("applied", len(applied))]
+    lines += [f"  + {a}" for a in applied]
+    if pending:
+        lines.append(_plural("pending", len(pending), "best-effort: gateway/cron unreachable"))
+        lines += [f"  ~ {p}" for p in pending]
+    if errors:
+        lines.append(f"errors ({len(errors)}):")
+        lines += [f"  ! {e}" for e in errors]
+    return "\n".join(lines)
+
+
+def _plural(noun: str, n: int, tail: str = "") -> str:
+    suffix = f" — {tail}" if tail else ""
+    return f"{n} {noun} action(s){suffix}."
+
+
+def _notify_execution(cfg: Config) -> None:
+    """After a plan is applied (manual approve), inject what it did."""
+    rec = state.last_execution(cfg)
+    if not rec:
+        return
+    run_id = rec.get("run_id", "?")
+    execution = rec.get("summary") or {}
+    lines = [f"[memtriage] Plan {run_id} executed — here is what it did:"]
+    lines.append(_render_execution(execution))
+    # Post-execution store usage, so the user sees how much headroom was won.
+    from memtriage import inventory as _inv
+
+    for t in _inv.inventory_memory(cfg):
+        frac = t["fraction"] * 100
+        lines.append(f"  {t['target']}: {t['current']:,}/{t['limit']:,} chars ({frac:.0f}%)")
+    _inject("\n".join(lines))
 
 
 def _notify_awaiting(cfg: Config, run_id: str) -> None:
@@ -213,7 +250,10 @@ def _dispatch(sub: str, rest: List[str], *, from_tool: bool) -> str:
         if sub == "review":
             return commands.cmd_review(cfg)
         if sub == "approve":
-            return commands.cmd_approve(cfg)
+            out = commands.cmd_approve(cfg)
+            # After the plan is applied, inject what it did in-session.
+            _notify_execution(_load_cfg())
+            return out
         if sub == "restore":
             text = " ".join(rest)
             return commands.cmd_restore(cfg, text)

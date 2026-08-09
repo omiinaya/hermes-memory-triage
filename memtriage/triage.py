@@ -86,6 +86,7 @@ def run_triage(
     if cfg.mode == "auto":
         provenance = f"session:auto triage {run_id} ({reason})"
         summary = Executor(cfg).execute_plan(actions, run_id, provenance)
+        state_mod.record_execution(cfg, run_id, summary)
         result["execution"] = summary
         state_mod.mark_triage(cfg, run_id)
     else:
@@ -105,6 +106,7 @@ def apply_plan(
     """Apply a (possibly user-edited) plan and close the approval cycle."""
     summary = Executor(cfg).execute_plan(plan, run_id, provenance)
     state_mod.mark_triage(cfg, run_id)
+    state_mod.record_execution(cfg, run_id, summary)
     return summary
 
 
