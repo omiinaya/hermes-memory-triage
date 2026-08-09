@@ -1,0 +1,7 @@
+name: hermes-memory-triage
+version: 0.1.0
+description: "Memory triage: when the built-in memory store nears capacity, routes knowledge to its proper home (skills, profile, memory provider, scripts) and evicts stale entries."
+pip_dependencies: []
+hooks:
+  - post_tool_call
+  - on_session_start
