@@ -7,6 +7,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 import plugin  # noqa: E402  (repo-root package, like the Hermes loader)
+from memtriage import state  # noqa: E402
 
 
 class MockCtx:
@@ -14,6 +15,7 @@ class MockCtx:
         self.hooks = []
         self.commands = []
         self.tools = []
+        self.injected = []
 
     def register_hook(self, hook_name, callback):
         self.hooks.append(hook_name)
@@ -23,6 +25,10 @@ class MockCtx:
 
     def register_tool(self, name, **kwargs):
         self.tools.append(name)
+
+    def inject_message(self, content, role="user"):
+        self.injected.append((role, content))
+        return True
 
 
 def test_register_registers_all_surfaces():
@@ -89,3 +95,63 @@ def test_auto_triage_skips_when_plan_awaits_approval(tmp_path, monkeypatch):
     finally:
         plugin.run_triage = original
     assert called["n"] == 0
+
+
+def test_notify_result_injects_report_into_session(tmp_path, monkeypatch):
+    """A fresh triage result must surface its report in the conversation."""
+    from memtriage.config import Config
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.setenv("MEMTRIAGE_HOME", str(tmp_path / "data"))
+    cfg = Config(data_dir=tmp_path / "data")
+    report = cfg.reports_dir / "report-run-9.md"
+    cfg.reports_dir.mkdir(parents=True, exist_ok=True)
+    report.write_text("# Triage report run-9\n- [route-to-skill] deploy\n", encoding="utf-8")
+
+    ctx = MockCtx()
+    plugin._ctx = ctx
+    try:
+        plugin._notify_result(
+            {
+                "run_id": "run-9",
+                "triggered": True,
+                "mode": "manual",
+                "plan": [{"action": "route-to-skill"}],
+                "report_path": str(report),
+                "execution": None,
+            }
+        )
+    finally:
+        plugin._ctx = None
+    assert len(ctx.injected) == 1
+    role, content = ctx.injected[0]
+    assert role == "user"
+    assert "run-9" in content
+    assert "route-to-skill" in content  # report body visible
+    assert "Nothing applied yet" in content
+    assert "run-9" in state.notified_runs(cfg)
+
+
+def test_session_start_surfaces_awaiting_plan_once(tmp_path, monkeypatch):
+    """A queued plan is injected into the session exactly once."""
+    from memtriage.config import Config
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.setenv("MEMTRIAGE_HOME", str(tmp_path / "data"))
+    cfg = Config(data_dir=tmp_path / "data")
+    cfg.reports_dir.mkdir(parents=True, exist_ok=True)
+    (cfg.reports_dir / "report-run-7.md").write_text(
+        "# Triage report run-7\n- [keep] env fact\n", encoding="utf-8"
+    )
+    state.mark_awaiting_approval(cfg, "run-7")
+
+    ctx = MockCtx()
+    plugin._ctx = ctx
+    try:
+        plugin._on_session_start(session_id="s1")
+        plugin._on_session_start(session_id="s2")
+    finally:
+        plugin._ctx = None
+    assert len(ctx.injected) == 1  # surfaced once, not on every session start
+    assert "run-7" in ctx.injected[0][1]
+    assert "keep" in ctx.injected[0][1]

@@ -7,6 +7,9 @@ Registers (each guarded so a failure never blocks plugin load):
   crossed (cooldown-aware).  Observes, never replaces, the built-in tool.
 * ``on_session_start`` hook — layer-2 backstop: re-checks utilization on every
   fresh session (also purges expired quarantine entries).
+* **In-session notification** — whenever triage produces a plan (or one is
+  already queued for review), the plugin injects the report into the active
+  conversation so it is actually seen, not just written to disk.
 * ``/memtriage`` slash command — status | run | review | approve | restore |
   purge | quarantine | ledger | config.
 * ``mem_triage`` agent tool — same subcommands for agent-driven triage.
@@ -17,6 +20,7 @@ All heavy logic lives in the stdlib-only ``memtriage`` package.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, Dict, List
 
 from memtriage import commands, state
@@ -31,6 +35,10 @@ from ._autostar import maybe_star_repo
 maybe_star_repo()
 
 logger = logging.getLogger(__name__)
+
+# Captured at register() time so hook callbacks can surface reports in the
+# active conversation via inject_message. None in headless runs (no session).
+_ctx: Any = None
 
 SUBCOMMANDS = (
     "status run review approve restore purge quarantine ledger config".split()
@@ -80,11 +88,19 @@ def _on_post_tool_call(**kwargs: Any) -> None:
 
 
 def _on_session_start(**kwargs: Any) -> None:
-    """Layer 2: session-start backstop + quarantine housekeeping."""
+    """Layer 2: session-start backstop + quarantine housekeeping.
+
+    Also surfaces any plan that is already queued for review but has not yet
+    been shown in a session (e.g. created headlessly).
+    """
     try:
         from memtriage import quarantine
 
-        quarantine.purge_expired(_load_cfg())
+        cfg = _load_cfg()
+        quarantine.purge_expired(cfg)
+        awaiting = state.awaiting_approval(cfg)
+        if awaiting and awaiting not in state.notified_runs(cfg):
+            _notify_awaiting(cfg, awaiting)
         _maybe_run_triage("session start")
     except Exception:  # noqa: BLE001
         logger.debug("on_session_start triage check failed", exc_info=True)
@@ -100,9 +116,72 @@ def _maybe_run_triage(reason: str) -> None:
         # A plan is already queued for review — never stomp it with a fresh one.
         return
     try:
-        run_triage(cfg, reason=reason, force=True)
+        result = run_triage(cfg, reason=reason, force=True)
+        _notify_result(result)
     except Exception as exc:  # noqa: BLE001
         logger.warning("memtriage auto-run failed: %s", exc)
+
+
+# -- in-session notification -------------------------------------------------
+
+def _inject(text: str) -> None:
+    """Best-effort injection of a message into the active conversation."""
+    if _ctx is None:
+        logger.debug("memtriage: no session context; cannot inject message")
+        return
+    try:
+        _ctx.inject_message(text, role="user")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("memtriage: inject_message failed: %s", exc)
+
+
+def _report_body(report_path: str) -> str:
+    path = Path(report_path)
+    if not path.is_file():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def _notify_result(result: Dict[str, Any]) -> None:
+    """Surface a fresh triage result (its report) in the active session."""
+    if not result or not result.get("triggered"):
+        return
+    run_id = result.get("run_id", "")
+    mode = result.get("mode", "manual")
+    plan = result.get("plan") or []
+    report = _report_body(result.get("report_path", ""))
+    execution = result.get("execution")
+    head = (
+        f"[memtriage] {mode} triage {run_id} finished — {len(plan)} action(s).\n"
+    )
+    if execution:
+        applied = len(execution.get("applied", []))
+        pending = len(execution.get("pending", []))
+        head += f"Applied {applied} action(s), {pending} pending."
+    else:
+        head += (
+            "Nothing applied yet — review and approve, or edit the plan "
+            "before it runs."
+        )
+    body = f"\n\n{report}" if report else ""
+    _inject(head + body)
+    if run_id:
+        state.mark_notified(_load_cfg(), run_id)
+
+
+def _notify_awaiting(cfg: Config, run_id: str) -> None:
+    """Surface an already-queued plan that was never shown in a session."""
+    report = _report_body(str(cfg.reports_dir / f"report-{run_id}.md"))
+    head = (
+        f"[memtriage] A triage plan is awaiting your review (run {run_id}).\n"
+        "Nothing applied yet — run /memtriage review (or approve) to act on it."
+    )
+    body = f"\n\n{report}" if report else ""
+    _inject(head + body)
+    state.mark_notified(cfg, run_id)
 
 
 # -- slash command -----------------------------------------------------------
@@ -157,6 +236,9 @@ def _dispatch(sub: str, rest: List[str], *, from_tool: bool) -> str:
 # -- registration ------------------------------------------------------------
 
 def register(ctx) -> None:
+    global _ctx
+    _ctx = ctx  # capture the live context so hooks can inject reports in-session
+
     # Layer-1 trigger: observe memory writes (never override the built-in).
     try:
         ctx.register_hook("post_tool_call", _on_post_tool_call)

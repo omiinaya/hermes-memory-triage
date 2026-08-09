@@ -83,3 +83,18 @@ def cooldown_active(cfg: Config, now: Optional[float] = None) -> bool:
         return False
     now = time.time() if now is None else now
     return (now - last) < cfg.cooldown_minutes * 60
+
+
+def notified_runs(cfg: Config) -> list:
+    """Run ids whose report has already been surfaced in a session."""
+    return list(_load(cfg).get("notified_runs", []) or [])
+
+
+def mark_notified(cfg: Config, run_id: str) -> None:
+    """Record that a run's report was injected into a conversation."""
+    state = _load(cfg)
+    runs = list(state.get("notified_runs", []) or [])
+    if run_id not in runs:
+        runs.append(run_id)
+    state["notified_runs"] = runs
+    _save(cfg, state)

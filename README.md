@@ -23,6 +23,15 @@ untouched.
 Both hooks are cooldown-aware (`cooldown_minutes`, default 60) so triage does
 not re-run on every write after a pass.
 
+## In-session notification
+
+When a trigger produces a plan — or a plan is already queued for review — the
+plugin **injects the report into the active conversation** (via
+`ctx.inject_message`), so you see what it flagged right in the session instead
+of only on disk. It surfaces each run's report once (records the run id in
+`state.json`). In manual mode the injected message makes it clear nothing has
+been applied yet and points you to `/memtriage review` / `/memtriage approve`.
+
 ## What triage does
 
 Pipeline: inventory → Cerveau (decision profile) → plan → apply.

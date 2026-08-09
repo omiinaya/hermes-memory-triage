@@ -19,4 +19,6 @@ All notable changes to this project are documented here. Format based on
   - `/memtriage` slash command and `mem_triage` agent tool.
   - Robust Cerveau plan extraction: fences, prose-before-JSON, stray control
     characters, empty arrays, last-array-wins, strict contract validation.
-  - Tests: 60-test suite, stdlib-only core, cross-platform paths/locks.
+  - In-session notification: triage reports are injected into the active
+    conversation (once per run) instead of only written to disk.
+  - Tests: 64-test suite, stdlib-only core, cross-platform paths/locks.
