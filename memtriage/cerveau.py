@@ -47,6 +47,11 @@ Routing taxonomy — choose ONE action per item:
 - "route-to-script": a recurring automatable task -> a runnable script.
   Requires "script_name", "script_ext" (py|sh|bash), and "text" (script body).
   Only use when the task is genuinely mechanical and repeatable.
+  RULE: every route-to-script MUST be paired with a corresponding
+  "route-to-skill" action (immediately after it in the array) that documents
+  the script and how to run it — create the skill if none exists, or describe
+  the updated usage if one does. The skill body must reference the script by
+  name/path and give the exact command to invoke it.
 - "evict-to-quarantine": stale/superseded/contradicted entry. The plugin
   quarantines it reversibly — you are not deleting. Never evict an entry that
   is identity-critical or security/environment-critical; demote those to
@@ -70,6 +75,10 @@ Safety rules (non-negotiable):
 - Never invent facts; only re-route text that is present in the inventory.
 - A routing plan that frees space but loses knowledge is a failure. Prefer
   routing (skill/provider/profile/script) over eviction.
+- TARGET RULE: routing actions (route-to-skill / route-to-profile /
+  route-to-provider / route-to-script) always have "target": "memory" — they
+  promote knowledge OUT of the working store. Only "keep", "consolidate" and
+  "evict-to-quarantine" may also target "user" (profile) entries.
 
 Dedup: the ledger below lists already-routed destinations. Do NOT re-route a
 fact that is already a skill or profile entry unless the ledger copy is
@@ -78,7 +87,11 @@ outdated.
 Ledger (already routed):
 {ledger}
 
-Reply with ONLY the JSON array, no prose, no markdown fences:
+Reply with ONLY the non-empty JSON array, no prose, no markdown fences. The
+array must contain at least one action. If an entry needs no change, still
+emit a "keep" action for it (action='keep', with its target and index and a
+helper reason) — NEVER return an empty array. The same inventory entry must
+not appear in more than one action.
 [{{
   "action": "keep|consolidate|route-to-skill|route-to-profile|route-to-provider|route-to-script|evict-to-quarantine",
   "target": "memory|user",

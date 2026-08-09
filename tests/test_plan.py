@@ -23,6 +23,22 @@ def test_parse_plan_from_prose_with_trailing_text():
     assert out[0]["skill_name"] == "x"
 
 
+def test_parse_plan_skips_reasoning_prose_before_json():
+    # The model reasons in prose (with stray brackets) BEFORE the real plan.
+    raw = (
+        "Let me think about this. The deploy procedure [see index 1] is clearly "
+        "procedural. Also the old-name unit (index [2]) is stale — superseded. "
+        'Final plan:\n[{"action": "route-to-skill", "skill_name": "deploy", '
+        '"text": "deploy the relay", "reason": "procedure"}, '
+        '{"action": "evict-to-quarantine", "target": "memory", "index": 2, '
+        '"reason": "superseded"}]'
+    )
+    out = plan.parse_plan(raw)
+    assert len(out) == 2
+    assert out[0]["action"] == "route-to-skill"
+    assert out[1]["action"] == "evict-to-quarantine"
+
+
 def test_parse_plan_rejects_missing_array():
     with pytest.raises(PlanValidationError):
         plan.parse_plan("no json here")
@@ -53,6 +69,45 @@ def test_validate_consolidate_requires_entries_and_text():
 def test_validate_accepts_valid_plan():
     actions = plan.validate([VALID_ACTION])
     assert len(actions) == 1
+
+
+def test_parse_plan_repairs_raw_newlines_in_strings():
+    # A REAL (unescaped) newline inside a JSON string — LLMs emit these.
+    raw = '[{"action": "route-to-script", "script_name": "cleanup", "text": "echo one\necho two"}]'
+    out = plan.parse_plan(raw)
+    assert out[0]["script_name"] == "cleanup"
+    assert out[0]["text"] == "echo one\necho two"
+
+
+def test_parse_plan_skips_empty_arrays():
+    # Reasoning mentions [] but the real plan comes after.
+    raw = (
+        "No changes? Returning []. Actually wait — one item is stale. Final: "
+        '[{"action": "evict-to-quarantine", "target": "memory", "index": 2, "reason": "superseded"}]'
+    )
+    out = plan.parse_plan(raw)
+    assert len(out) == 1
+    assert out[0]["action"] == "evict-to-quarantine"
+
+
+def test_parse_plan_takes_last_valid_array():
+    raw = (
+        'Example: [{"action": "keep", "target": "memory", "index": 0, "reason": "example"}]\n'
+        'Final committed plan: [{"action": "route-to-skill", "skill_name": "final", "text": "t", "reason": "real"}]'
+    )
+    out = plan.parse_plan(raw)
+    assert out[0]["skill_name"] == "final"
+
+
+def test_validate_rejects_routing_from_user_target():
+    with pytest.raises(PlanValidationError):
+        plan.validate(
+            [{"action": "route-to-profile", "target": "user", "index": 0, "text": "x"}]
+        )
+    # But keep/evict may target user.
+    assert plan.validate(
+        [{"action": "keep", "target": "user", "index": 0, "reason": "ok"}]
+    )
 
 
 def test_render_report_lists_actions():

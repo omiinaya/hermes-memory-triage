@@ -18,7 +18,7 @@ delete                  hard-delete an entry (only after quarantine grace)
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 VALID_ACTIONS = (
     "keep",
@@ -34,50 +34,76 @@ VALID_ACTIONS = (
 # index; all other actions reference at most one.
 CONSOLIDATION_KINDS = ("consolidate",)
 
+# Routing actions move knowledge OUT of the working memory store, so they must
+# always target the "memory" target (never the "user" profile — an already-
+# profiled entry is not something to re-route "to profile").
+ROUTING_KINDS = (
+    "route-to-skill",
+    "route-to-profile",
+    "route-to-provider",
+    "route-to-script",
+)
+
 
 class PlanValidationError(ValueError):
     """Raised when a plan received from Cerveau violates the contract."""
 
 
-def _first_json_array(text: str) -> str:
-    """Extract the first balanced JSON array from ``text``.
+def _array_spans(text: str) -> List[str]:
+    """Yield every balanced JSON array substring, in order of appearance.
 
-    Scans for the first ``[``, then walks brackets (strings-aware enough for
-    JSON: honors escaped quotes) to find its matching ``]``, returning the
-    exact substring. Raises PlanValidationError when unbalanced/missing.
+    Non-overlapping scan: after finding a balanced ``[...]`` block, scanning
+    resumes just past it. Arrays nested inside a yielded block are not re-yield
+    (the outer block is what json.loads cares about); nested arrays within the
+    plan's own objects are handled by the outer balanced scan, which takes the
+    whole top-level array.
     """
-    start = text.find("[")
-    if start == -1:
-        raise PlanValidationError("No JSON action array found in Cerve reply.")
-    depth = 0
-    in_string = False
-    escape = False
-    for i in range(start, len(text)):
+    spans: List[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
         ch = text[i]
-        if in_string:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == '"':
-                in_string = False
-            continue
-        if ch == '"':
-            in_string = True
-        elif ch == "[":
-            depth += 1
-        elif ch == "]":
-            depth -= 1
-            if depth == 0:
-                return text[start : i + 1]
-    raise PlanValidationError("Unbalanced JSON array in Cerve reply.")
+        if ch == "[":
+            depth = 0
+            in_string = False
+            escape = False
+            j = i
+            while j < n:
+                c = text[j]
+                if in_string:
+                    if escape:
+                        escape = False
+                    elif c == "\\":
+                        escape = True
+                    elif c == '"':
+                        in_string = False
+                    j += 1
+                    continue
+                if c == '"':
+                    in_string = True
+                elif c == "[":
+                    depth += 1
+                elif c == "]":
+                    depth -= 1
+                    if depth == 0:
+                        spans.append(text[i : j + 1])
+                        i = j + 1
+                        break
+                j += 1
+            if depth != 0:
+                break  # unbalanced from here; give up scanning
+        else:
+            i += 1
+    return spans
 
 
 def parse_plan(raw: str) -> List[Dict[str, Any]]:
     """Extract and parse a JSON action list from Cerve's reply text.
 
-    Tolerant extraction: strips markdown fences, pulls the first balanced JSON
-    array, and validates the result against the action contract.
+    Robust extraction: strips markdown fences, then tries every balanced JSON
+    array in the reply (the model may include reasoning prose before the plan)
+    and returns the first array that parses AND validates as a plan of actions.
+    Stray control characters inside strings are repaired first.
     """
     text = raw.strip()
     if "```" in text:
@@ -85,14 +111,57 @@ def parse_plan(raw: str) -> List[Dict[str, Any]]:
 
         fences = re.findall(r"```(?:json)?\s+(.*?)```", text, re.DOTALL)
         text = fences[0] if fences else text
-    candidate = _first_json_array(text)
-    try:
-        parsed = json.loads(candidate)
-    except json.JSONDecodeError as exc:
-        raise PlanValidationError(f"Malformed JSON in Cerve reply: {exc}") from exc
-    if not isinstance(parsed, list):
-        raise PlanValidationError("Cerve reply must contain a JSON array.")
-    return validate(parsed)
+    valid: List[List[Dict[str, Any]]] = []
+    last_err: Optional[Exception] = None
+    for candidate in _array_spans(text):
+        try:
+            parsed = json.loads(_auto_escape_controls_in_strings(candidate))
+            if isinstance(parsed, list) and parsed:
+                validated = validate(parsed)
+                valid.append(validated)  # an empty valid list is useless — skip
+        except PlanValidationError as exc:
+            last_err = exc
+        except json.JSONDecodeError as exc:
+            last_err = exc
+    if valid:
+        return valid[-1]  # the model commits to the plan at the END of its reply
+    raise PlanValidationError(
+        f"No non-empty action array in Cerve reply"
+        + (f" ({last_err})" if last_err else "")
+    )
+
+
+def _auto_escape_controls_in_strings(s: str) -> str:
+    """Repair unescaped control characters inside JSON string literals.
+
+    LLMs sometimes emit raw newlines/tabs inside a JSON string instead of the
+    escaped form (``\\n``/``\\t``/``\\r``). ``json.loads`` rejects those.
+    Walk the string, and while inside a string literal, convert any literal
+    control character to its escaped form. Whitespace BETWEEN tokens is left
+    untouched (outside strings).
+    """
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    mapping = {"\n": "\\n", "\t": "\\t", "\r": "\\r"}
+    for ch in s:
+        if escaped:
+            out.append(ch)
+            escaped = False
+            continue
+        if ch == "\\":
+            out.append(ch)
+            escaped = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            out.append(ch)
+            continue
+        if in_string and ch in mapping:
+            out.append(mapping[ch])
+            continue
+        out.append(ch)
+    return "".join(out)
 
 
 def validate(actions: List[Any]) -> List[Dict[str, Any]]:
@@ -107,6 +176,14 @@ def validate(actions: List[Any]) -> List[Dict[str, Any]]:
         if kind not in VALID_ACTIONS:
             raise PlanValidationError(
                 f"Action #{n} has invalid action {kind!r}."
+            )
+        # Only "keep"/"evict-to-quarantine"/"consolidate" may target "user";
+        # the routing actions move knowledge OUT of the working memory store,
+        # so they must reference target "memory".
+        if kind in ROUTING_KINDS and a.get("target", "memory") != "memory":
+            raise PlanValidationError(
+                f"Action #{n} ({kind}) must target 'memory', got "
+                f"{a.get('target')!r}."
             )
         if kind == "consolidate":
             entries = a.get("entries", [])
