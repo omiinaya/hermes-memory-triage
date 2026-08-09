@@ -235,6 +235,34 @@ def render_report(
     return "\n".join(lines)
 
 
+def render_impact(execution: Dict[str, Any]) -> List[str]:
+    """Per-target before→after impact in percentage points.
+
+    Consumes the ``before``/``after`` usage snapshots the executor records,
+    and renders how much the working store actually changed — the plugin's
+    real impact — in percentages, not raw char counts.
+    """
+    before = execution.get("before") or {}
+    after = execution.get("after") or {}
+    out: List[str] = []
+    for target in ("memory", "user"):
+        a = after.get(target)
+        if not a:
+            continue
+        after_pct = a.get("fraction", 0.0) * 100
+        b = before.get(target)
+        if b:
+            before_pct = b.get("fraction", 0.0) * 100
+            delta_pp = before_pct - after_pct
+            out.append(
+                f"{target}: {before_pct:.0f}% -> {after_pct:.0f}% "
+                f"({delta_pp:+.0f}pp freed)"
+            )
+        else:
+            out.append(f"{target}: {after_pct:.0f}%")
+    return out
+
+
 def save_report(cfg, run_id: str, report: str) -> str:
     """Persist a report file; returns its path."""
     cfg.reports_dir.mkdir(parents=True, exist_ok=True)

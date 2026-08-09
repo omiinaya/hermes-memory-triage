@@ -35,7 +35,12 @@ def test_forced_triage_auto_executes(tmp_path, monkeypatch):
     memory_store.write_entries("memory", ["x" * 2000])
     result = run_triage(cfg, reason="manual", force=True, dispatch=False)
     assert result["triggered"] is True
-    assert result["execution"] == {"applied": [], "pending": [], "errors": []}
+    exec_summary = result["execution"]
+    assert exec_summary["applied"] == [] and exec_summary["pending"] == []
+    assert exec_summary["errors"] == []
+    # Impact snapshot recorded so summaries can report % change.
+    assert "before" in exec_summary and "after" in exec_summary
+    assert exec_summary["after"]["memory"]["current"] == 2000
     assert state.awaiting_approval(cfg) is None
     assert state.last_triage_at(cfg) is not None
     assert state.last_execution(cfg) is not None  # post-execution summary recorded

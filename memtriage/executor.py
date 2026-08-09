@@ -12,8 +12,11 @@ Provider and cron delivery are best-effort: if the gateway is unreachable or a
 registration fails, the action is recorded as "pending" (visible in the report)
 rather than silently dropped.
 
-Every routed artifact is recorded in the ledger with provenance so Cerveau
-never re-routes it.
+Routing actions (route-to-skill/profile/provider/script) COPY the knowledge to
+its destination; to actually free the working store the SOURCE entry must be
+dropped afterward. That drop happens centrally in execute_plan so indices stay
+consistent with the original inventory. Every routed artifact is recorded in the
+ledger with provenance so Cerveau never re-routes it.
 """
 
 from __future__ import annotations
@@ -22,10 +25,11 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from . import ledger, quarantine, store as memory_store
 from .config import Config
+from .plan import ROUTING_KINDS
 
 SKILL_FRONTMATTER = """---
 name: {name}
@@ -95,6 +99,33 @@ def _register_cron(script_abs: str, schedule: str) -> str:
         return f"pending ({exc})"
 
 
+def _usage_snapshot(cfg: Config) -> Dict[str, Dict[str, Any]]:
+    """Per-target usage snapshot keyed by target name, plus percent-of-limit."""
+    snap: Dict[str, Dict[str, Any]] = {}
+    for t in memory_store.TARGET_MEMORY, memory_store.TARGET_USER:
+        u = memory_store.usage(t)
+        snap[u["target"]] = {
+            "current": u["current"],
+            "limit": u["limit"],
+            "fraction": u["fraction"],
+        }
+    return snap
+
+
+def _collect_source_drops(plan) -> Dict[str, List[int]]:
+    """Routing source indices per target (indices reference the ORIGINAL inventory)."""
+    drops: Dict[str, List[int]] = {}
+    for a in plan:
+        kind = a.get("action")
+        if kind not in ROUTING_KINDS:
+            continue
+        idx = a.get("index")
+        if idx is None:
+            continue
+        drops.setdefault(a.get("target", "memory"), []).append(int(idx))
+    return drops
+
+
 class Executor:
     """Applies a plan; collects results into a report-friendly summary."""
 
@@ -114,14 +145,38 @@ class Executor:
     def execute_plan(
         self, plan: List[Dict[str, Any]], run_id: str, provenance: str
     ) -> Dict[str, Any]:
-        self._run_id = run_id
+        before = _usage_snapshot(self.cfg)
+
         for n, action in enumerate(plan):
             kind = action["action"]
             try:
                 self._apply(kind, action, provenance)
             except Exception as exc:  # noqa: BLE001
                 self.errors.append(f"action #{n} ({kind}): {exc}")
-        return {"applied": self.applied, "pending": self.pending, "errors": self.errors}
+
+        # Routing COPIED knowledge to its destination; now drop the source so the
+        # working store actually frees. Drop highest index first per target so a
+        # previous drop doesn't shift a later index in the same list.
+        for target, indices in _collect_source_drops(plan).items():
+            for idx in sorted(set(indices), reverse=True):
+                try:
+                    victim = _drop_index(target, idx)
+                    self.applied.append(
+                        f"freed source [{target}] ~{len(victim)} chars"
+                    )
+                except IndexError as exc:
+                    self.errors.append(
+                        f"free source [{target}]#{idx} failed: {exc}"
+                    )
+
+        after = _usage_snapshot(self.cfg)
+        return {
+            "applied": self.applied,
+            "pending": self.pending,
+            "errors": self.errors,
+            "before": before,
+            "after": after,
+        }
 
     # -- per-action dispatch ---------------------------------------------
 
@@ -201,6 +256,8 @@ class Executor:
             raise ValueError("route-to-provider requires text")
         notice = _dispatch_to_provider(self.cfg, text)
         if notice.startswith("pending"):
+            # The source entry must still be freed from the working store even
+            # though the provider copy is pending (it is quarantined instead).
             self._note_pending(f"route-to-provider: {notice}")
         else:
             self._note(f"routed to provider (gateway {notice})")
@@ -242,17 +299,17 @@ class Executor:
             self.cfg, target=target, text=victim,
             reason=a.get("reason", ""), run_id=self._run_id,
         )
-        self._note(f"evicted-to-quarantine {len(victim)} chars [{target}]")
+        self._note(f"quarantined {len(victim)} chars [{target}]")
 
 
-# -- store helpers -----------------------------------------------------------
+# -- store helpers ----------------------------------------------------------
 
 
 def _drop_index(target: str, idx: int) -> str:
     """Remove the entry at ``idx`` and return its text."""
     entries = memory_store.read_entries(target)
     if idx < 0 or idx >= len(entries):
-        raise IndexError(f"index {idx} out of range for target {target!r}")
+        raise IndexError(f"source index {idx} out of range for target {target!r}")
     victim = entries[idx]
     kept = [e for i, e in enumerate(entries) if i != idx]
     memory_store.write_entries(target, kept)

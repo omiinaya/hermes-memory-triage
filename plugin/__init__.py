@@ -193,12 +193,15 @@ def _plural(noun: str, n: int, tail: str = "") -> str:
 
 def _notify_execution(cfg: Config) -> None:
     """After a plan is applied (manual approve), inject what it did."""
+    from memtriage import plan as plan_mod
+
     rec = state.last_execution(cfg)
     if not rec:
         return
     run_id = rec.get("run_id", "?")
     execution = rec.get("summary") or {}
-    lines = [f"[memtriage] Plan {run_id} executed — here is what it did:"]
+    lines = [f"[memtriage] Plan {run_id} executed — impact:"]
+    lines += plan_mod.render_impact(execution) or ["  (no usage snapshots)"]
     lines.append(_render_execution(execution))
     # Post-execution store usage, so the user sees how much headroom was won.
     from memtriage import inventory as _inv

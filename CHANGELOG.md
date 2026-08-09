@@ -5,7 +5,17 @@ All notable changes to this project are documented here. Format based on
 
 ## [Unreleased]
 
+### Fixed
+- Routing actions (route-to-skill/profile/provider/script) now actually free
+  the working store: after copying knowledge to its destination, the source
+  entry is dropped from memory. Previously they only copied (ledger + write)
+  and the store never shrank — so triage had no measurable impact.
+
 ### Added
+- Execution summaries now report impact in percentage points: before/after
+  usage snapshots are recorded per run and rendered as e.g.
+  `memory: 98% -> 84% (+14pp freed)` in the `/memtriage` output and the
+  in-session post-execution notice.
 - Initial implementation of the hermes-memory-triage plugin:
   - Two-layer auto-trigger via plugin hooks (post_tool_call + on_session_start),
     decoupled from the context compressor.

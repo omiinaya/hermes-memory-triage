@@ -53,6 +53,7 @@ def cmd_run(cfg: Config, force: bool = False) -> str:
            f"  Actions: {len(result['plan'])}"]
     exec_summary = result.get("execution")
     if exec_summary:
+        out += [f"  Impact: {impact}" for impact in plan_mod.render_impact(exec_summary)]
         for a in exec_summary.get("applied", []):
             out.append(f"  applied: {a}")
         for p in exec_summary.get("pending", []):
@@ -87,7 +88,8 @@ def cmd_approve(cfg: Config) -> str:
     except FileNotFoundError as exc:
         return f"Approve failed: {exc}"
     summary = apply_plan(cfg, plan, run_id, provenance=f"session:manual approve {run_id}")
-    lines = [f"Applied plan {run_id}:"]
+    lines = [f"Applied plan {run_id} — impact:"]
+    lines += plan_mod.render_impact(summary) or ["  (no usage snapshots)"]
     for a in summary.get("applied", []):
         lines.append(f"  applied: {a}")
     for p in summary.get("pending", []):
