@@ -93,6 +93,7 @@ def test_route_to_script_writes_and_makes_executable(tmp_path, monkeypatch):
 
 def test_route_to_provider_unreachable_becomes_pending(tmp_path, monkeypatch):
     cfg = _cfg(tmp_path, monkeypatch)
+    memory_store.write_entries("memory", ["rich scene knowledge"])
     ex = _exec(cfg)
     summary = ex.execute_plan(
         [{"action": "route-to-provider", "text": "rich scene knowledge"}],
@@ -100,6 +101,9 @@ def test_route_to_provider_unreachable_becomes_pending(tmp_path, monkeypatch):
     )
     assert summary["errors"] == []
     assert any("route-to-provider" in p for p in summary["pending"])
+    # Data-safety: a failed provider write must NOT silently drop the source
+    # entry from the working store (it is only recoverable via the plan file).
+    assert memory_store.read_entries("memory") == ["rich scene knowledge"]
 
 
 def test_evict_quarantines_and_removes(tmp_path, monkeypatch):

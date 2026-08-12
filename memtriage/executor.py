@@ -68,17 +68,41 @@ def _make_executable(path: Path) -> None:
         pass  # Windows / restricted FS: ignore
 
 
-def _dispatch_to_provider(cfg, text: str) -> str:
-    """Best-effort scene write to the provider gateway. Returns a notice."""
-    url = cfg.provider_base_url.rstrip("/") + "/v3/atomic/update"
-    payload = {"op": "upsert", "kind": "scene", "content": text}
+def _dispatch_to_provider(cfg, text: str, scene_path: str = "memtriage/triage.md") -> str:
+    """Best-effort scene write to the provider gateway. Returns a notice.
+
+    Correct wiring (verified 2026-08-11):
+      - Route:  /v3/scenario/write  (NOT /v3/atomic/update — that route does
+        not exist; atomic/* are L1 structured memories, scenes live under
+        scenario/*)
+      - Auth:   Authorization: Bearer <key-or-'local'> + x-tdai-service-id
+        (the gateway 401s without these)
+      - Body:   {path, content, summary?} + tenancy fields team_id/agent_id/
+        user_id (v3 requires the full triple; absent -> 422)
+    """
+    url = cfg.provider_base_url.rstrip("/") + "/v3/scenario/write"
+    api_key = getattr(cfg, "provider_api_key", "") or "local"
+    service_id = getattr(cfg, "provider_service_id", "") or "hermes-memtriage"
+    payload = {
+        "op": "upsert",
+        "path": scene_path,
+        "content": text,
+        "summary": (text[:120] + "…") if len(text) > 120 else text,
+        "team_id": "default",
+        "agent_id": "default",
+        "user_id": "default",
+    }
     try:
         import urllib.request
 
         req = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+                "x-tdai-service-id": service_id,
+            },
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -202,8 +226,11 @@ class Executor:
             self._remove_source(removals, a)
             return
         if kind == "route-to-provider":
-            self._do_provider(a)
-            self._remove_source(removals, a)
+            ok = self._do_provider(a)
+            if ok:
+                self._remove_source(removals, a)
+            else:
+                self._note_pending("route-to-provider: kept source entry (gateway write failed)")
             return
         if kind == "route-to-script":
             self._do_script(a)
@@ -258,16 +285,21 @@ class Executor:
         self._note(f"routed to profile ({len(text)} chars)")
         self._ledger("user", "USER.md", text[:200])
 
-    def _do_provider(self, a) -> None:
+    def _do_provider(self, a) -> bool:
+        """Best-effort provider write. Returns True only if the gateway write
+        succeeded. On failure the caller must KEEP the source entry in the
+        working store (no silent data loss) — it is only recoverable from the
+        plan file otherwise."""
         text = (a.get("text") or "").strip()
         if not text:
             raise ValueError("route-to-provider requires text")
         notice = _dispatch_to_provider(self.cfg, text)
         if notice.startswith("pending"):
             self._note_pending(f"route-to-provider: {notice}")
-        else:
-            self._note(f"routed to provider (gateway {notice})")
+            return False
+        self._note(f"routed to provider (gateway {notice})")
         self._ledger("provider", "provider/scene", text[:200])
+        return True
 
     def _do_script(self, a) -> None:
         script_name = a.get("script_name") or "routed-script"

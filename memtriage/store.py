@@ -73,7 +73,30 @@ def char_count(entries: List[str]) -> int:
 
 
 def char_limit(target: str) -> int:
-    return DEFAULT_CHAR_LIMITS.get(target, DEFAULT_CHAR_LIMITS[TARGET_MEMORY])
+    """Return the char limit for a target, honoring the live Hermes config.
+
+    The built-in memory tool reads memory_char_limit / user_char_limit from
+    config.yaml (raised to 4000/3000 in this deployment). Mirror that source
+    so triage reports the same (honest) capacity the tool actually enforces,
+    instead of a stale hardcoded default. Falls back to defaults if the
+    config file is unreadable.
+    """
+    override = None
+    try:
+        import yaml  # type: ignore
+        cfg_path = Path(os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")) / "config.yaml"
+        if cfg_path.exists():
+            with open(cfg_path, encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+            m = (data.get("memory") or {})
+            override = {
+                TARGET_MEMORY: int(m.get("memory_char_limit") or DEFAULT_CHAR_LIMITS[TARGET_MEMORY]),
+                TARGET_USER: int(m.get("user_char_limit") or DEFAULT_CHAR_LIMITS[TARGET_USER]),
+            }
+    except Exception:  # noqa: S110 — fall back to defaults on any read error
+        pass
+    limits = override or DEFAULT_CHAR_LIMITS
+    return limits.get(target, limits[TARGET_MEMORY])
 
 
 @contextlib.contextmanager

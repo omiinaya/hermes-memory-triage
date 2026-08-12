@@ -28,9 +28,28 @@ def test_char_count_matches_builtin():
     assert store.char_count(entries) == len("aaaa\n§\nbb")
 
 
-def test_char_limits():
+def test_char_limits_fallback_defaults(tmp_path):
+    """Without a config.yaml, char_limit returns the built-in defaults
+    (2200 memory / 1375 user) — matching the memory tool's fallback."""
+    os.environ["HERMES_HOME"] = str(tmp_path)  # no config.yaml here
     assert store.char_limit(TARGET_MEMORY) == 2200
     assert store.char_limit(TARGET_USER) == 1375
+
+
+def test_char_limits_reads_live_config(tmp_path):
+    """When config.yaml sets memory.user_char_limit / memory_char_limit,
+    char_limit honors the live values instead of stale hardcoded ones.
+    (This is the fix that stopped triage from reporting 99% against a
+    limit we had already raised to 4000/3000.)"""
+    import yaml
+
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump({"memory": {"memory_char_limit": 4000, "user_char_limit": 3000}}),
+        encoding="utf-8",
+    )
+    os.environ["HERMES_HOME"] = str(tmp_path)
+    assert store.char_limit(TARGET_MEMORY) == 4000
+    assert store.char_limit(TARGET_USER) == 3000
 
 
 def test_missing_file_reads_empty(tmp_path):
