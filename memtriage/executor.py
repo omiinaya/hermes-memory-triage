@@ -68,29 +68,59 @@ def _make_executable(path: Path) -> None:
         pass  # Windows / restricted FS: ignore
 
 
-def _dispatch_to_provider(cfg, text: str, scene_path: str = "memtriage/triage.md") -> str:
-    """Best-effort scene write to the provider gateway. Returns a notice.
+_PROVIDER_KEY_ENV = ("TDAI_LLM_API_KEY", "MEMORY_TENCENTDB_LLM_API_KEY")
+_PROVIDER_SERVICE_ID_ENV = ("TDAI_GATEWAY_SERVICE_ID", "MEMORY_TENCENTDB_GATEWAY_SERVICE_ID")
 
-    Correct wiring (verified 2026-08-11):
-      - Route:  /v3/scenario/write  (NOT /v3/atomic/update — that route does
-        not exist; atomic/* are L1 structured memories, scenes live under
-        scenario/*)
-      - Auth:   Authorization: Bearer <key-or-'local'> + x-tdai-service-id
-        (the gateway 401s without these)
-      - Body:   {path, content, summary?} + tenancy fields team_id/agent_id/
-        user_id (v3 requires the full triple; absent -> 422)
+
+def _provider_api_key(cfg) -> str:
+    """Provider gateway key: in-memory override first, then env, else empty.
+
+    NEVER committed, never logged. The env family is TDAI_* /
+    MEMORY_TENCENTDB_* (source: /root/.memory-tencentdb/tdai-gateway.yaml,
+    e.g. TDAI_LLM_API_KEY). Empty means "no key available" and the caller
+    fails open to a pending notice.
     """
-    url = cfg.provider_base_url.rstrip("/") + "/v3/scenario/write"
-    api_key = getattr(cfg, "provider_api_key", "") or "local"
-    service_id = getattr(cfg, "provider_service_id", "") or "hermes-memtriage"
+    override = getattr(cfg, "provider_api_key", "") or ""
+    if override:
+        return override
+    for name in _PROVIDER_KEY_ENV:
+        val = os.environ.get(name, "").strip()
+        if val:
+            return val
+    return ""
+
+
+def _dispatch_to_provider(cfg, text: str, scene_path: str = "memtriage/triage.md") -> str:
+    """Best-effort knowledge write to the provider gateway. Returns a notice.
+
+    Correct wiring (re-verified live 2026-08-13 against the running gateway
+    at 127.0.0.1:8420, v0.1.0):
+      - Route:  /v2/conversation/add  (the CREATE path: it ingests the text
+        as an L0 message and the gateway pipeline extracts L1 atomic notes
+        from it, returning 200). /v2/atomic/update and /v2/scenario/write
+        are UPDATE-ONLY — they 404 when the note/file does not exist, so a
+        new offload can never land there.
+      - Auth:   Authorization: Bearer {api_key} + x-tdai-service-id (both
+        required; the gateway 401s without either). The key comes from env
+        (TDAI_LLM_API_KEY / MEMORY_TENCENTDB_LLM_API_KEY) — never committed.
+      - Body:   {session_id, messages:[{role, content}]}; tenancy defaults
+        to the default bucket when omitted.
+    """
+    api_key = _provider_api_key(cfg)
+    if not api_key:
+        return "pending (no provider api key in env: TDAI_LLM_API_KEY / MEMORY_TENCENTDB_LLM_API_KEY)"
+    service_id = ""
+    for name in _PROVIDER_SERVICE_ID_ENV:
+        val = os.environ.get(name, "").strip()
+        if val:
+            service_id = val
+            break
+    if not service_id:
+        service_id = getattr(cfg, "provider_service_id", "") or "hermes-memtriage"
+    url = cfg.provider_base_url.rstrip("/") + "/v2/conversation/add"
     payload = {
-        "op": "upsert",
-        "path": scene_path,
-        "content": text,
-        "summary": (text[:120] + "…") if len(text) > 120 else text,
-        "team_id": "default",
-        "agent_id": "default",
-        "user_id": "default",
+        "session_id": scene_path,
+        "messages": [{"role": "user", "content": text}],
     }
     try:
         import urllib.request
