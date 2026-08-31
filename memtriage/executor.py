@@ -225,7 +225,14 @@ class Executor:
             final = kept + appends[target]
             if final != original[target]:
                 memory_store.write_entries(target, final)
-                freed = sum(len(original[target][i]) for i in removals[target])
+                # Only count in-range removal indices when reporting freed
+                # chars — a hallucinated/out-of-range index (e.g. a stale
+                # ledger reference) must not crash the whole rebuild.
+                freed = sum(
+                    len(original[target][i])
+                    for i in removals[target]
+                    if 0 <= i < len(original[target])
+                )
                 self.applied.append(f"freed {freed} chars [{target}]")
 
         after = _usage_snapshot()

@@ -130,3 +130,24 @@ def test_bad_index_reports_error_not_crash(tmp_path, monkeypatch):
     )
     assert len(summary["errors"]) == 1
     assert "out of range" in summary["errors"][0]
+
+
+def test_out_of_range_routing_index_does_not_crash_rebuild(tmp_path, monkeypatch):
+    """A routing action with a hallucinated/out-of-range source index must not
+    crash the whole plan rebuild (regression: index 2 on a 2-entry store was
+    crashing the 'freed chars' sum after _remove_source added it unguarded)."""
+    cfg = _cfg(tmp_path, monkeypatch)
+    memory_store.write_entries("user", ["entry zero", "entry one"])
+    ex = _exec(cfg)
+    # route-to-skill targeting user, but index 2 is out of range (store has 2)
+    summary = ex.execute_plan(
+        [{"action": "route-to-skill", "target": "user", "index": 2,
+          "skill_name": "phantom", "text": "phantom body"}],
+        "test-run", "provenance:p",
+    )
+    # Must not raise; the out-of-range removal is simply skipped.
+    assert summary["errors"] == []
+    # Both real entries survive (index 2 removes nothing).
+    assert memory_store.read_entries("user") == ["entry zero", "entry one"]
+    # The skill WAS written (routing side-effect), but source kept.
+    assert (cfg.skills_root / "tools" / "phantom" / "SKILL.md").exists()
