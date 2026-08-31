@@ -217,12 +217,42 @@ class Executor:
                 )
 
         # Rebuild each target once from the surviving originals + appends.
+        # SAFETY FLOOR: never let a plan EMPTY a target (post == 0 chars). In
+        # auto mode a plan can otherwise offload the ENTIRE working store
+        # (observed: the full 2,041-char user-profile entry routed to the
+        # provider, leaving USER.md at 0 chars). If a removal would empty a
+        # target, refuse and keep the source entries — knowledge is never
+        # silently lost from the working store.
         for target in original:
+            limit = memory_store.char_limit(target)
+            removals[target] = {
+                i for i in removals[target]
+                if 0 <= i < len(original[target])  # drop out-of-range
+            }
             kept = [
                 e for i, e in enumerate(original[target])
                 if i not in removals[target]
             ]
             final = kept + appends[target]
+            post_chars = memory_store.char_count(final)
+            # Only refuse when the plan actually removes something AND would
+            # leave the target completely empty. Legitimate consolidation or
+            # eviction that leaves SOME content is fine (a small store is
+            # legitimately small).
+            if (
+                removals[target]
+                and limit
+                and post_chars == 0
+            ):
+                # Refuse: would empty this target entirely.
+                self.errors.append(
+                    f"target '{target}' would become empty "
+                    f"({post_chars}/{limit} chars) — refused; "
+                    f"source entries kept"
+                )
+                removals[target] = set()  # keep everything in place
+                kept = list(original[target])
+                final = kept + appends[target]
             if final != original[target]:
                 memory_store.write_entries(target, final)
                 # Only count in-range removal indices when reporting freed

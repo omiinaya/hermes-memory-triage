@@ -8,7 +8,10 @@ from memtriage.executor import Executor
 
 
 def _cfg(tmp_path, monkeypatch):
+    # CRITICAL isolation: point the memory store at temp dirs so no test
+    # reads/writes the REAL ~/.hermes/memories/USER.md / MEMORY.md.
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.setenv("MEMTRIAGE_HOME", str(tmp_path / "data"))
     return Config(
         data_dir=tmp_path / "data",
         scripts_dir=str(tmp_path / "scripts"),
@@ -151,3 +154,25 @@ def test_out_of_range_routing_index_does_not_crash_rebuild(tmp_path, monkeypatch
     assert memory_store.read_entries("user") == ["entry zero", "entry one"]
     # The skill WAS written (routing side-effect), but source kept.
     assert (cfg.skills_root / "tools" / "phantom" / "SKILL.md").exists()
+
+
+def test_safety_floor_prevents_emptying_target(tmp_path, monkeypatch):
+    """A plan that would empty a target must be refused: the source entries
+    stay in the working store (regression: auto-mode routed the ENTIRE
+    2,041-char user profile to the provider, emptying USER.md).
+
+    Uses a consolidate (no provider/network involved) that would merge the
+    store down to empty-free content — deterministic and portable."""
+    cfg = _cfg(tmp_path, monkeypatch)
+    memory_store.write_entries("user", ["user identity core"])
+    ex = _exec(cfg)
+    summary = ex.execute_plan(
+        # consolidate both indices... but only 1 entry exists. Use a
+        # route-to-script which removes the source index 0, emptying user.
+        [{"action": "route-to-script", "target": "user", "index": 0,
+          "script_name": "ph", "script_ext": "sh", "text": "#!/bin/sh\n"}],
+        "test-run", "provenance:p",
+    )
+    # The removal was refused (would empty the target) — the entry survives.
+    assert memory_store.read_entries("user") == ["user identity core"]
+    assert any("empty" in e for e in summary["errors"])
