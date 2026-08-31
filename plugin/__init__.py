@@ -20,8 +20,16 @@ All heavy logic lives in the stdlib-only ``memtriage`` package.
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 from typing import Any, Dict, List
+
+# Hermes loads plugins with submodule_search_locations=<plugin>/ — but the
+# `memtriage` package lives one level UP as a sibling of plugin/. Put the
+# plugin's parent dir on sys.path so `from memtriage import ...` resolves.
+_parent = str(Path(__file__).resolve().parent.parent)
+if _parent not in sys.path:
+    sys.path.insert(0, _parent)
 
 from memtriage import commands, state
 from memtriage.config import Config

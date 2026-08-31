@@ -34,12 +34,13 @@ VALID_ACTIONS = (
 # index; all other actions reference at most one.
 CONSOLIDATION_KINDS = ("consolidate",)
 
-# Routing actions move knowledge OUT of the working memory store, so they must
-# always target the "memory" target (never the "user" profile — an already-
-# profiled entry is not something to re-route "to profile").
+# Routing actions promote knowledge OUT of the working store. They may target
+# EITHER "memory" (working agent notes) or "user" (the user profile) — a
+# profile entry holding reusable/doctrine knowledge can be routed to a skill
+# or provider just like a memory entry. ONLY "route-to-profile" is restricted
+# to "memory": routing a profile fact "back into the profile" is a no-op.
 ROUTING_KINDS = (
     "route-to-skill",
-    "route-to-profile",
     "route-to-provider",
     "route-to-script",
 )
@@ -177,10 +178,14 @@ def validate(actions: List[Any]) -> List[Dict[str, Any]]:
             raise PlanValidationError(
                 f"Action #{n} has invalid action {kind!r}."
             )
-        # Only "keep"/"evict-to-quarantine"/"consolidate" may target "user";
-        # the routing actions move knowledge OUT of the working memory store,
-        # so they must reference target "memory".
-        if kind in ROUTING_KINDS and a.get("target", "memory") != "memory":
+        # TARGET RULE: routing actions promote knowledge OUT of the working
+        # store. "route-to-profile" must target "memory" (an already-profiled
+        # entry is not something to route back into the profile). The other
+        # routing actions may target "memory" OR "user" — profile entries
+        # holding reusable doctrine can be routed to a skill or provider like
+        # any memory entry (this is what lets triage relieve an over-full user
+        # profile).
+        if kind == "route-to-profile" and a.get("target", "memory") != "memory":
             raise PlanValidationError(
                 f"Action #{n} ({kind}) must target 'memory', got "
                 f"{a.get('target')!r}."

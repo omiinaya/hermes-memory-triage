@@ -26,6 +26,8 @@ DEFAULT_THRESHOLD_PERCENT = 0.75
 DEFAULT_QUARANTINE_DAYS = 7
 DEFAULT_COOLDOWN_MINUTES = 60
 DEFAULT_CERVEAU_PROFILE = "cerveau"
+DEFAULT_CERVEAU_TIMEOUT = 600
+DEFAULT_DETERMINISTIC_FALLBACK = True
 DEFAULT_SCRIPTS_DIR = "~/.hermes/scripts"
 DEFAULT_PROVIDER_BASE_URL = "http://127.0.0.1:8420"
 
@@ -42,6 +44,8 @@ class Config:
     cooldown_minutes: int = DEFAULT_COOLDOWN_MINUTES
     cerveau_profile: str = DEFAULT_CERVEAU_PROFILE
     cerveau_bin: str = "hermes"
+    cerveau_timeout: int = DEFAULT_CERVEAU_TIMEOUT
+    deterministic_fallback: bool = DEFAULT_DETERMINISTIC_FALLBACK
     scripts_dir: str = DEFAULT_SCRIPTS_DIR
     provider_base_url: str = DEFAULT_PROVIDER_BASE_URL
     data_dir: Path = field(default_factory=lambda: _default_data_dir())
@@ -106,6 +110,8 @@ class Config:
             "cooldown_minutes": self.cooldown_minutes,
             "cerveau_profile": self.cerveau_profile,
             "cerveau_bin": self.cerveau_bin,
+            "cerveau_timeout": self.cerveau_timeout,
+            "deterministic_fallback": self.deterministic_fallback,
             "scripts_dir": self.scripts_dir,
             "provider_base_url": self.provider_base_url,
             "data_dir": str(self.data_dir),

@@ -5,7 +5,7 @@
 Flow:
 1. (optional) check usage against threshold (skipped when ``force``),
 2. build the inventory + ledger payload,
-3. dispatch Cerveau, parse + validate the plan,
+3. dispatch Cerveau (or its deterministic fallback), parse + validate the plan,
 4. manual mode: persist report + mark awaiting approval,
    auto mode: execute immediately and write the report after.
 
@@ -64,9 +64,12 @@ def run_triage(
 
     if dispatch:
         prompt = cerveau_mod.build_prompt(cfg, inv, led)
-        actions = cerveau_mod.dispatch(cfg, prompt)
+        actions = cerveau_mod.dispatch(cfg, prompt, inventory=inv)
     else:
         actions = []  # tests inject via execute directly
+    fallback_used = any(
+        a.get("_source") == "deterministic-fallback" for a in actions
+    )
 
     report = plan_mod.render_report(
         actions, usage_before={"memory": usage_before}, run_id=run_id
@@ -81,6 +84,9 @@ def run_triage(
         "usage_before": usage_before,
         "plan": actions,
         "report_path": report_path,
+        "dispatcher": ("deterministic-fallback" if fallback_used else "cerveau")
+        if dispatch
+        else "injected",
     }
 
     if cfg.mode == "auto":

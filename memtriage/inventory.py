@@ -75,21 +75,48 @@ def inventory_scripts(cfg: Config) -> List[Dict[str, Any]]:
     return result
 
 
+def _cap_entry_text(text: str, max_chars: int = 160) -> str:
+    """Truncate a single memory entry for the Cerveau payload.
+
+    Cerveau routes decisions, it does not need byte-faithful copies — a
+    160-char lead plus the character count is enough for ``keep vs evict``.
+    This keeps the relay prompt well under token budget; without it a 95%
+    user store (3k chars across ~10 entries + scripts/skills list) produces
+    a ~74KB JSON blob that the proxy relay (avg 9.6s/token) can't return
+    within the dispatch timeout.
+    """
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rsplit(" ", 1)[0] + " …[truncated]"
+
+
 def inventory_memory(cfg: Config) -> List[Dict[str, Any]]:
-    """Returns per-target usage plus a full entry breakdown."""
+    """Returns per-target usage plus a compact entry breakdown."""
     targets: List[Dict[str, Any]] = []
     for target in (memory_store.TARGET_MEMORY, memory_store.TARGET_USER):
         u = memory_store.usage(target)
+        # The user profile is the decision surface for "can we relieve the
+        # over-full profile" — truncating a 2,041-char doctrine blob to 160
+        # chars hides the sub-facts Cerveau could route away (and hides that
+        # many are static/rottable). Give Cerveau the FULL user entry text;
+        # the memory target keeps the compact cap (it's already well under
+        # threshold and payload size matters for the slow relay).
+        cap = None if target == memory_store.TARGET_USER else 160
+        entries = [
+            {
+                "index": i,
+                "text": e if cap is None else _cap_entry_text(e, cap),
+                "chars": len(e),
+            }
+            for i, e in enumerate(u["entries"])
+        ]
         targets.append(
             {
                 "target": target,
                 "current": u["current"],
                 "limit": u["limit"],
                 "fraction": u["fraction"],
-                "entries": [
-                    {"index": i, "text": e, "chars": len(e)}
-                    for i, e in enumerate(u["entries"])
-                ],
+                "entries": entries,
             }
         )
     return targets
