@@ -217,12 +217,15 @@ class Executor:
                 )
 
         # Rebuild each target once from the surviving originals + appends.
-        # SAFETY FLOOR: never let a plan EMPTY a target (post == 0 chars). In
-        # auto mode a plan can otherwise offload the ENTIRE working store
-        # (observed: the full 2,041-char user-profile entry routed to the
-        # provider, leaving USER.md at 0 chars). If a removal would empty a
-        # target, refuse and keep the source entries — knowledge is never
-        # silently lost from the working store.
+        # SAFETY FLOOR: the USER profile is identity-critical — a plan must
+        # never drop it below a meaningful floor in one shot. Observed
+        # catastrophe: auto-mode routed the ENTIRE 2,041-char identity/doctrine
+        # entry to the provider, taking the user store from 76% to 8% in a
+        # single action. The memory target is rotateable scratch and may be
+        # emptied (post==0) but even then the refusal keeps entries safe.
+        # For user: refuse any removal that would drop it below 10% of limit.
+        # For memory: refuse only a complete empty (post == 0).
+        USER_MIN_FRACTION = 0.10
         for target in original:
             limit = memory_store.char_limit(target)
             removals[target] = {
@@ -235,20 +238,19 @@ class Executor:
             ]
             final = kept + appends[target]
             post_chars = memory_store.char_count(final)
-            # Only refuse when the plan actually removes something AND would
-            # leave the target completely empty. Legitimate consolidation or
-            # eviction that leaves SOME content is fine (a small store is
-            # legitimately small).
-            if (
-                removals[target]
-                and limit
-                and post_chars == 0
-            ):
-                # Refuse: would empty this target entirely.
+            post_fraction = (post_chars / limit) if limit else 1.0
+            floor = (
+                USER_MIN_FRACTION
+                if target == memory_store.TARGET_USER
+                else 0.0  # memory: only refuse a complete empty
+            )
+            # Refuse when the plan actually removes something AND the post
+            # state falls below the target's floor.
+            if removals[target] and limit and post_fraction < floor:
                 self.errors.append(
-                    f"target '{target}' would become empty "
-                    f"({post_chars}/{limit} chars) — refused; "
-                    f"source entries kept"
+                    f"target '{target}' would drop to "
+                    f"{post_chars}/{limit} chars ({post_fraction*100:.0f}%) "
+                    f"< {floor*100:.0f}% floor — refused; source entries kept"
                 )
                 removals[target] = set()  # keep everything in place
                 kept = list(original[target])

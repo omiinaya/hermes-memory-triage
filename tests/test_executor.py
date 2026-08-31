@@ -167,12 +167,12 @@ def test_safety_floor_prevents_emptying_target(tmp_path, monkeypatch):
     memory_store.write_entries("user", ["user identity core"])
     ex = _exec(cfg)
     summary = ex.execute_plan(
-        # consolidate both indices... but only 1 entry exists. Use a
-        # route-to-script which removes the source index 0, emptying user.
+        # route-to-script removes the source index 0, which would drop the
+        # user store below the 10% identity floor — must be refused.
         [{"action": "route-to-script", "target": "user", "index": 0,
           "script_name": "ph", "script_ext": "sh", "text": "#!/bin/sh\n"}],
         "test-run", "provenance:p",
     )
-    # The removal was refused (would empty the target) — the entry survives.
+    # The removal was refused (would drop below the user floor) — entry stays.
     assert memory_store.read_entries("user") == ["user identity core"]
-    assert any("empty" in e for e in summary["errors"])
+    assert any("floor" in e for e in summary["errors"])
