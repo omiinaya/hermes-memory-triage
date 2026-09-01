@@ -226,12 +226,30 @@ class Executor:
         # For user: refuse any removal that would drop it below 10% of limit.
         # For memory: refuse only a complete empty (post == 0).
         USER_MIN_FRACTION = 0.10
+        # IDENTITY GUARD: a "user" entry carrying identity/doctrine markers can
+        # NEVER be routed away or evicted, even if siblings keep the store above
+        # the floor. The model legitimately tries to demote the giant
+        # identity/doctrine blob to the provider; that is wrong — the identity
+        # belongs in the working profile. (mirror cerveau.PROTECTED_MARKERS)
         for target in original:
             limit = memory_store.char_limit(target)
             removals[target] = {
                 i for i in removals[target]
                 if 0 <= i < len(original[target])  # drop out-of-range
             }
+            if target == memory_store.TARGET_USER:
+                for i in list(removals[target]):
+                    text = original[target][i]
+                    low = text.lower()
+                    if any(k in low for k in (
+                        "sullen", "minaya", "never evict", "voice boundary",
+                        "vault", "cyber-name",
+                    )):
+                        self.errors.append(
+                            f"action would remove identity entry #{i} "
+                            f"(identity/doctrine markers) — refused; kept"
+                        )
+                        removals[target].discard(i)
             kept = [
                 e for i, e in enumerate(original[target])
                 if i not in removals[target]

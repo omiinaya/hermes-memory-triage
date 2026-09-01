@@ -176,3 +176,38 @@ def test_safety_floor_prevents_emptying_target(tmp_path, monkeypatch):
     # The removal was refused (would drop below the user floor) — entry stays.
     assert memory_store.read_entries("user") == ["user identity core"]
     assert any("floor" in e for e in summary["errors"])
+
+
+def test_identity_entry_never_routed_away_even_above_floor(tmp_path, monkeypatch):
+    """The identity/doctrine entry must survive a route-away even when sibling
+    entries keep the user store ABOVE the 10% floor. Regression: auto-mode
+    routed the giant 2,041-char identity blob to the provider while the emoji +
+    disk-gate + H3 entries kept the store at 53% — above the floor — so the
+    floor did NOT protect it and the identity left the working profile."""
+    cfg = _cfg(tmp_path, monkeypatch)
+    identity = ("Omar Minaya — cyber-name SULLEN (explicit 2026-08-13); "
+                "real name GUARDED vault-only. NEVER evict. Voice boundary "
+                "(2026-08-12): never adopt skills that change how Ciel talks.")
+    siblings = [
+        "Emoji preference (2026-08-29): prefer hearts, never the sun.",
+        "Disk-space gate (2026-08-30): check filesystem room before install.",
+    ]
+    memory_store.write_entries("user", [identity] + siblings)
+    # Simulate a SUCCESSFUL gateway write (the failure path keeps the entry
+    # anyway; the guard must hold even when the write would have succeeded).
+    monkeypatch.setattr(
+        "memtriage.executor._dispatch_to_provider",
+        lambda cfg, text, scene_path=None: "200 ok",
+    )
+    ex = _exec(cfg)
+    summary = ex.execute_plan(
+        # Model proposes routing the WHOLE identity entry (idx 0) to provider,
+        # while siblings keep the store above the floor.
+        [{"action": "route-to-provider", "target": "user", "index": 0,
+          "text": identity}],
+        "test-run", "provenance:p",
+    )
+    entries = memory_store.read_entries("user")
+    assert identity in entries, "identity entry was routed away!"
+    assert len(entries) == 3, "siblings must remain too"
+    assert any("identity" in e for e in summary["errors"])
