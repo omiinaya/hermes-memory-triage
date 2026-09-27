@@ -12,6 +12,19 @@ requires-python = ">=3.9"
 # re-add it to plugins.disabled. Fixed 2026-09-27.
 license = "MIT"
 
+[tool.setuptools]
+# DANGER 2026-09-27: without this, setuptools refuses the build ("Multiple
+# top-level packages discovered in a flat-layout: ['plugin', 'memtriage',
+# 'profile_seeds']"). That build failure is what kept the plugin permanently in
+# plugins.disabled — every `hermes` CLI call rebuilt the environment, saw the
+# failure, and put it straight back. `plugins.disabled: []` never held for more
+# than a minute until this was declared.
+packages = ["memtriage", "plugin"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"*" = ["*.yaml", "*.yml", "*.md", "*.json", "*.txt"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

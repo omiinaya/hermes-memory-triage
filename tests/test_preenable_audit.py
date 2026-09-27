@@ -1,3 +1,4 @@
+import json
 """Regression tests for the 2026-09-27 pre-enablement audit.
 
 Each test here corresponds to a defect found by dry-running the REAL Cerveau
@@ -731,3 +732,78 @@ def test_the_real_live_reply_now_yields_the_cerveau_plan():
     kinds = {a["action"] for a in out}
     assert "route-to-provider" in kinds
     assert "route-to-skill" in kinds
+
+
+# --- defect 15: a mis-nested span SWALLOWED the real plan ------------------
+#
+# Fixing defect 14 by resyncing (i += 1) was necessary but not sufficient: the
+# resynced scan sometimes produced a bracket-balanced span that ran 38KB to the
+# reply's end, so the real plan inside it was never yielded. A second live run
+# on 2026-09-27 fell back to all-keep for exactly this reason. A span is now
+# only yielded once it actually loads as JSON.
+
+
+def test_a_mis_nested_span_does_not_swallow_the_plan_farther_down():
+    from memtriage.plan import _array_spans, parse_plan
+
+    # A bracket-balanced fragment that is NOT valid JSON: a real "[" opens it
+    # and a real "]" closes it 38KB later, so the naive balanced scan swallows
+    # everything in between -- including the genuine plan.
+    noise = '[{"kind": "skill", "summary": "unterminated noise'
+    plan = [
+        {"action": "route-to-provider", "target": "memory", "index": 0,
+         "text": "real content a", "reason": "because"},
+        {"action": "keep", "target": "user", "index": 0, "reason": "identity"},
+    ]
+    reply = "Query: " + noise + "\n" + json.dumps(plan) + "\ntrailing prose ]"
+
+    spans = _array_spans(reply)
+    # The plan must survive as its own span despite the noise.
+    parsed = parse_plan(reply)
+    assert len(parsed) == 2, f"expected the real 2-action plan, got {len(parsed)}"
+    assert parsed[0]["text"] == "real content a"
+
+
+def test_a_bracket_balanced_but_invalid_span_is_not_yielded():
+    from memtriage.plan import _array_spans
+
+    noise = '[{"kind": "skill", "summary": "no closing brace'
+    reply = noise + ']\n[{"action": "keep", "target": "memory", "index": 0}]'
+
+    spans = _array_spans(reply)
+    for s in spans:
+        json.loads(s)  # every yielded span must be real JSON
+    assert any('"action"' in s for s in spans), "the real plan span was lost"
+
+
+def test_control_characters_in_a_span_do_not_hide_it():
+    """A repairable control char must not make a REAL array look like noise."""
+    from memtriage.plan import _array_spans
+
+    reply = '[{"action": "keep", "target": "memory", "index": 0, "reason": "a\tb"}]'
+    spans = _array_spans(reply)
+    assert len(spans) == 1, "a repairable array must still be yielded"
+
+
+def test_the_second_real_live_reply_parses_to_the_cerveau_plan():
+    """Both replies captured from real runs must yield the CERVEAU plan.
+
+    The 38KB-swallowing span (defect 15) only shows up with a genuinely messy
+    reply, so this is a recorded-fixture test: the exact bytes
+    ``hermes chat`` produced, including the echoed prompt, the truncated
+    inventory, and the model's answer. A synthetic reproduction was not enough
+    to kill the mutation that survived, so the real thing is pinned here.
+    """
+    from memtriage.plan import parse_plan
+
+    raw = pathlib.Path(__file__).parent / "fixtures" / "cerveau_reply_messy.txt"
+    if not raw.exists():
+        pytest.skip("recorded Cerveau reply not present")
+    text = raw.read_text()
+
+    plan = parse_plan(text)
+    assert len(plan) == 13, f"expected 13 actions, got {len(plan)}"
+    # Every action must come from the model, not the all-keep fallback.
+    assert all(a.get("_source", "cerveau") == "cerveau" for a in plan)
+    kinds = {a["action"] for a in plan}
+    assert kinds != {"keep"}, "fell back to the all-keep no-op"

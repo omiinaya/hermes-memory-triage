@@ -1,0 +1,1012 @@
+==
+Query: You are Cerveau, the memory triage decision-maker.
+
+A Hermes memory store has reached 75% of its budget. Your job is to
+produce a routing plan: a JSON array of actions. Route every piece of knowledge
+to its proper home and flag stale entries. Act now; do not ask questions.
+
+Input inventory (JSON):
+{
+ "memory": [
+  {
+   "target": "memory",
+   "current": 3787,
+   "limit": 4000,
+   "fraction": 0.9467,
+   "entries": [
+    {
+     "index": 0,
+     "text": "Projects on /mnt/pve/mrx-thunder/projects via SAME-PATH symlinks 
+(top-level /root/projects->thunder; per-project links). Non-plugin clones on 
+thunder; plugin …",
+     "chars": 170
+    },
+    {
+     "index": 1,
+     "text": "Thin-client fleet (hub :7900 exec loopback :7901/:7902): dma-pc 
+.63 (mrx-mini), mrx-predator .115 (omiin), bazzite .19 (mrx), omar-mac .51 
+(kenia). ALL on …",
+     "chars": 684
+    },
+    {
+     "index": 2,
+     "text": "FedEx tracking SOLVED (2026-09-24), pure-cffi. Recipe = 
+stock-Chrome warm-up on a Decodo residential IP to mint FRESH cookies, then 
+curl_cffi chrome136 replay …",
+     "chars": 269
+    },
+    {
+     "index": 3,
+     "text": "oem/log dev blog: https://omiinaya.github.io/oem-log/ (public MIT,
+Astro, auto-deploys, local /root/projects/dev-blog). Writing rule (Omar, 
+strong): …",
+     "chars": 327
+    },
+    {
+     "index": 4,
+     "text": "hermes-hearth (2026-09-25): omiinaya/hermes-hearth PRIVATE, 
+/root/browser-hub, unit `hearth` (systemd --user, :8791, venv on thunder). 3 
+surfaces: daemon …",
+     "chars": 488
+    },
+    {
+     "index": 5,
+     "text": "gantree: PRIVATE omiinaya/gantree",
+     "chars": 33
+    },
+    {
+     "index": 6,
+     "text": "oem-ui (2026-09-26) = OFFICIAL name of house design system (was 
+cli-mono). PRIVATE omiinaya/oem-ui, /root/projects/oem-ui, 175 tests. Skill …",
+     "chars": 445
+    },
+    {
+     "index": 7,
+     "text": "oem-cdn (2026-09-27): PRIVATE omiinaya/oem-cdn, 
+/root/projects/oem-cdn. Design LOCKED, all 7 phases built: 114 unit tests, 100 
+e2e assertions (scripts/e2e.sh), …",
+     "chars": 637
+    },
+    {
+     "index": 8,
+     "text": "oem-portfolio: /root/projects/oem-portfolio, static Astro on 
+oem-ui, all copy in src/data/content.ts. PROJECTS deliberately empty (12 
+placeholder slots; old 14 …",
+     "chars": 271
+    },
+    {
+     "index": 9,
+     "text": "spacetime-ab (omiinaya/spacetime-ab, PRIVATE, /root/spacetime-ab):
+DNS adblocker on SpacetimeDB. Remediation COMPLETE 2026-09-27 — parity 20/21 (9 
+proven live, …",
+     "chars": 436
+    }
+   ]
+  },
+  {
+   "target": "user",
+   "current": 978,
+   "limit": 3000,
+   "fraction": 0.326,
+   "entries": [
+    {
+     "index": 0,
+     "text": "Omar Minaya, cyber-name SULLEN. Ciel is my partner, never 'Papa'. 
+VIEWING: I view oem sites on my iPHONE in Safari, so WebKit is the engine that 
+matters - verify layout in WebKit at an iPhone viewport. CONVENTIONS: commit 
+EARLY+OFTEN and push EVERY commit, authored omiinaya, never root. LAN-BIND: 
+always bind to 0.0.0.0, never localhost.",
+     "chars": 338
+    },
+    {
+     "index": 1,
+     "text": "Verification bar (Omar, demonstrated 2026-09-27 on code-spaces): a
+green suite is not proof — fix real bugs the tests were green over, and 
+mutation-check every new test so it genuinely fails when the fix is reverted. 
+Mocks must mirror the real response body; a test asserting on its own invented 
+fixture proves nothing. Verify layout in real WebKit at an iPhone viewport, not 
+just desktop.",
+     "chars": 389
+    },
+    {
+     "index": 2,
+     "text": "When a device/user reports a suspected fault, expects deep 
+investigation and end-to-end proof, not reassurance - and if they say \"can you 
+X the second it's back\", wants it as a durable systemd unit (3s poll, all 
+lanes), not a session-bound loop.",
+     "chars": 245
+    }
+   ]
+  }
+ ],
+ "skills": [
+  {
+   "name": "airtable",
+   "description": "Airtable REST API via curl. Records CRUD, filters, upserts.",
+   "path": "/root/.hermes/skills/.archive/airtable/SKILL.md"
+  },
+  {
+   "name": "apple-notes",
+   "description": "Manage Apple Notes via memo CLI: create, search, edit.",
+   "path": "/root/.hermes/skills/.archive/apple-notes/SKILL.md"
+  },
+  {
+   "name": "apple-reminders",
+   "description": "Apple Reminders via remindctl: add, list, complete.",
+   "path": "/root/.hermes/skills/.archive/apple-reminders/SKILL.md"
+  },
+  {
+   "name": "appliance-operator-profiles",
+   "description": "Operator profiles for self-hosted appliances via REST API.",
+   "path": "/root/.hermes/skills/.archive/appliance-operator-profiles/SKILL.md"
+  },
+  {
+   "name": "architecture-diagram",
+   "description": "Dark-themed SVG architecture/cloud/infra diagrams as HTML.",
+   "path": "/root/.hermes/skills/.archive/architecture-diagram/SKILL.md"
+  },
+  {
+   "name": "...",
+   "description": "(+26 more omitted)",
+   "path": ""
+  }
+ ],
+ "scripts": [
+  {
+   "path": "/root/.hermes/scripts/Dockerfile.test-frontend",
+   "name": "Dockerfile.test-frontend"
+  },
+  {
+   "path": "/root/.hermes/scripts/__pycache__/fleet-model-sync.cpython-313.pyc",
+   "name": "fleet-model-sync.cpython-313.pyc"
+  },
+  {
+   "path": "/root/.hermes/scripts/__pycache__/tn-set-gui-cert.cpython-313.pyc",
+   "name": "tn-set-gui-cert.cpython-313.pyc"
+  },
+  {
+   "path": "/root/.hermes/scripts/_insert_1.sql",
+   "name": "_insert_1.sql"
+  },
+  {
+   "path": "/root/.hermes/scripts/acl11-clients.sh",
+   "name": "acl11-clients.sh"
+  },
+  {
+   "path": "/root/.hermes/scripts/acl11-fix.sh",
+   "name": "acl11-fix.sh"
+  },
+  {
+   "path": "/root/.hermes/scripts/acl11-list.sh",
+   "name": "acl11-list.sh"
+  },
+  {
+   "path": "/root/.hermes/scripts/acl11-rebuild.sh",
+   "name": "acl11-rebuild.sh"
+  },
+  {
+   "path": "/root/.hermes/scripts/apply-jwt-on108.sh",
+   "name": "apply-jwt-on108.sh"
+  },
+  {
+   "path": "/root/.hermes/scripts/archive_cold_dirs.sh",
+   "name": "archive_cold_dirs.sh"
+  },
+  {
+   "path": "...",
+   "name": "...(+more omitted)"
+  }
+ ]
+}
+
+Routing taxonomy — choose ONE action per item:
+
+- "keep": the entry is durable, current, and correctly placed. No change.
+- "consolidate": two or more entries overlap; merge them into one tighter
+  entry. Requires "entries":  (>=2) and "text": the merged text.
+- "route-to-skill": a reusable procedure or workflow that will be needed
+  again -> becomes a SKILL.md. Requires "skill_name" and "text" (the SKILL.md
+  body, without frontmatter — the plugin adds it).
+- "route-to-profile": an identity/role/preference fact about the user ->
+  target "user".
+- "route-to-provider": rich episodic knowledge or scene context that should
+  live in the memory provider (scene block). Requires "text".
+- "route-to-script": a recurring automatable task -> a runnable script.
+  Requires "script_name", "script_ext" (py|sh|bash), and "text" (script body).
+  Only use when the task is genuinely mechanical and repeatable.
+  RULE: every route-to-script MUST be paired with a corresponding
+  "route-to-skill" action (immediately after it in the array) that documents
+  the script and how to run it — create the skill if none exists, or describe
+  the updated usage if one does. The skill body must reference the script by
+  name/path and give the exact command to invoke it.
+- "evict-to-quarantine": stale/superseded/contradicted entry. The plugin
+  quarantines it reversibly — you are not deleting. Never evict an entry that
+  is identity-critical or security/environment-critical; demote those to
+  "route-to-provider" instead. Never evict a fact that contradicts a NEWER
+  entry; evict the older one. Never evict anything on a first pass unless it
+  is clearly superseded.
+- "delete": never use. The plugin never hard-deletes on a triage pass.
+- "split": ONE oversized entry mixes identity with routable doctrine. Every
+  other action is whole-or-nothing, so the plugin's identity guard refuses
+  the entire blob and the store stays over budget forever. Use "split" to
+  keep the core and route the rest. Requires:
+    "keep":   the clause(s) that must STAY in the store (verbatim from the
+              source entry).
+    "routes": a list of routing actions (route-to-skill / route-to-provider /
+              route-to-script) that receive the other clauses. Each route is
+              {"action": ..., "text": <clause>, ...} — no "index" needed.
+  Example shape (the angle-bracket text below is a TEMPLATE — never copy it
+  into "text"/"keep"; always substitute the real clauses you read out of the
+  store, verbatim):
+    {"action": "split", "target": "user", "index": 0,
+      "keep": "<the identity core, verbatim>",
+      "routes": [{"action": "route-to-skill", "skill_name": "team-doctrine",
+                   "text": "<the deploy/repo clauses>"}]}
+  Splitting is the ONLY way to relieve a store whose pressure is one giant
+  identity entry. If you see such an entry, split it — do not "keep" it and
+  do not evict it.
+
+Staleness signals (from the user's doctrine):
+1. Superseded — a newer entry covers the same subject (new convention wins).
+2. Contradiction — a newer entry states the opposite; the newer one survives.
+3. Zero utility — no provider search heat and no recent session references,
+   non-identity class, older than ~60 days.
+4. Explicit "forget this" instructions from the user.
+
+Safety rules (non-negotiable):
+- Identity, security, and environment-critical facts are NEVER evicted; at
+  worst they are demoted to the provider or consolidated.
+- Evictions are reversible (quarantine); do not over-evict. When in doubt,
+  choose "keep" or "consolidate".
+- Never invent facts; only re-route text that is present in the inventory.
+- A routing plan that frees space but loses knowledge is a failure. Prefer
+  routing (skill/provider/profile/script) over eviction.
+- TARGET RULE: routing actions (route-to-skill / route-to-provider /
+  route-to-script) promote knowledge OUT of the working store and may target
+  EITHER "memory" or "user" (profile). A user-profile entry holding
+  reusable/doctrine knowledge can be routed to a skill or provider — that is
+  the primary way to relieve an over-full profile. ONLY "route-to-profile"
+  is restricted to "memory" (an already-profiled entry is not re-routed to
+  the profile). "keep", "consolidate" and "evict-to-quarantine" may
+  target "memory" or "user".
+
+Dedup: the ledger below lists already-routed destinations. Do NOT re-route a
+fact that is already a skill or profile entry unless the ledger copy is
+outdated.
+
+Ledger (already routed):
+[
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/pve-storage-placement/SKILL.md",
+  "summary": "# PVE Storage Placement (team rule)\n\nUse when installing or 
+creating new app containers on the PVE host (root@pve) — pair with the 
+pve-scripts-local skill.\n\nRules:\n- New app container rootfs goes on t",
+  "run_id": "20260809-083146-c1509f8e",
+  "provenance": "session:manual approve 20260809-083146-c1509f8e",
+  "routed_at": "2026-08-09T08:38:53Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/playbook-script-doctrine/SKILL.md",
+  "summary": "# Playbook-script doctrine\n\nUse when deciding to write or 
+maintain a playbook script for a system operation.\n\n- Script ONLY frequent, 
+high-impact operations (~10-20 per system).\n- Judgment lives in th",
+  "run_id": "20260811-130222-e39efe60",
+  "provenance": "session:manual approve 20260811-130222-e39efe60",
+  "routed_at": "2026-08-12T01:40:22Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/relay-model-fallback/SKILL.md",
+  "summary": "Use when configuring Hermes model fallback through the proxy 
+relay, or when relay models return 503/429.\n\nModel fallback lesson 
+(2026-08-12): Omar REJECTED the entire nemotron family (nemotron-3-ultra",
+  "run_id": "20260813-021044-d4dd3c0a",
+  "provenance": "session:auto triage 20260813-021044-d4dd3c0a (memory-write 
+threshold crossed)",
+  "routed_at": "2026-08-13T02:12:37Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/skills-sh/SKILL.md",
+  "summary": "# skills.sh adoption (2026-08-13)\n\nUse when a new idea needs 
+agent skills from skills.sh, or when triaging/adopting upstream skills.\n\n## 
+Adoption rule (Sullen, 2026-08-13)\n- Source-available IS fine (",
+  "run_id": "20260813-055624-73a4e60a",
+  "provenance": "session:auto triage 20260813-055624-73a4e60a (memory-write 
+threshold crossed)",
+  "routed_at": "2026-08-13T05:57:31Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/hermes-memory-triage/SKILL.md",
+  "summary": "## Repo sync pitfall (2026-08-13)\n\nWhen pushing elf commits to 
+hermes-memory-triage (repo omiinaya/hermes-memory-triage): repo main often lags 
+the deployed plugin — Aica's T1 fix duplicated upstream c",
+  "run_id": "20260813-172128-cd55dfa3",
+  "provenance": "session:auto triage 20260813-172128-cd55dfa3 (memory-write 
+threshold crossed)",
+  "routed_at": "2026-08-13T17:23:27Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/chappy-operations/SKILL.md",
+  "summary": "## Decodo proxy + Turnstile gated-download diagnostics 
+(2026-08-13)\n\nDecodo residential proxies (family convention): Chappy ONLY, 
+never general traffic. Creds at ~/.hermes/credentials/decodo-proxy.env",
+  "run_id": "20260814-025923-7f8c85e6",
+  "provenance": "session:auto triage 20260814-025923-7f8c85e6 (memory-write 
+threshold crossed)",
+  "routed_at": "2026-08-14T03:00:43Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/apt-sequoia-cuda-key-fix/SKILL.md",
+  "summary": "Use when the PVE host (Debian 13 trixie, root@pve) apt fails 
+against the NVIDIA CUDA repo, or when re-applying the CUDA apt key 
+fix.\n\nSymptom: apt 3.0.3 rejects the NVIDIA CUDA repo key (EB693B30...3B",
+  "run_id": "20260814-053601-32beeb01",
+  "provenance": "session:auto triage 20260814-053601-32beeb01 (memory-write 
+threshold crossed)",
+  "routed_at": "2026-08-14T05:37:17Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/spacetimedb-wasm-publish/SKILL.md",
+  "summary": "Use when publishing a WASM module to SpacetimeDB (STDB) and 
+hitting 'bad magic number' errors, or when wiring JWT/sub identity to a 
+published STDB database.\n\nGotcha (2026-08-14, STDB v2.7.1): curl mul",
+  "run_id": "20260815-000034-915513c7",
+  "provenance": "session:auto triage 20260815-000034-915513c7 (session start)",
+  "routed_at": "2026-08-15T00:03:25Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/scout-prowl-ops/SKILL.md",
+  "summary": "Use when operating or debugging the scout-prowl kanban patrol 
+(cron cd16edc2ef42, every 15 min) or when the ainon scout posts improvement 
+tickets.\n\nSystem: ainon patrols kanban repos constantly via /r",
+  "run_id": "20260815-030035-0516cff2",
+  "provenance": "session:auto triage 20260815-030035-0516cff2 (session start)",
+  "routed_at": "2026-08-15T03:01:43Z"
+ },
+ {
+  "kind": "skill",
+  "destination": 
+"/root/.hermes/skills/tools/hermes-update-cron-safety/SKILL.md",
+  "summary": "Use when updating Hermes on the gateway. Lesson (2026-08-16): 
+hermes-auto-update crash — cron runs inside the gateway tree; hermes update must
+restart the gateway → SIGTERM kills cron mid-install. Coo",
+  "run_id": "20260819-040036-02625194",
+  "provenance": "session:auto triage 20260819-040036-02625194 (session start)",
+  "routed_at": "2026-08-19T04:05:08Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/systemd-envfile-gotchas/SKILL.md",
+  "summary": "Use when debugging env values loaded via systemd EnvFile (e.g. 
+/etc/spacetime-rpm.env). LESSON: same-line tokens concatenate — an env value 
+without a trailing newline (especially SPACETIMERPM_CSP) mer",
+  "run_id": "20260819-040036-02625194",
+  "provenance": "session:auto triage 20260819-040036-02625194 (session start)",
+  "routed_at": "2026-08-19T04:05:08Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/family-heartbeat-tick/SKILL.md",
+  "summary": "Watchdog pitfall (addendum): the family-heartbeat-tick watchdog 
+flags legit forked long work as 'stuck'. Fork = setsid nohup hermes -p $p chat 
+--resume. Fix: widen the inactivity window for forked/leg",
+  "run_id": "20260819-040036-02625194",
+  "provenance": "session:auto triage 20260819-040036-02625194 (session start)",
+  "routed_at": "2026-08-19T04:05:08Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/cyber-elf-lifecycle/SKILL.md",
+  "summary": "Commit/review convention (2026-08-18, Omar): elves commit to 
+cyber-elf/task_* review branches → AILON (Commander) reviews → Ailon merges to 
+main. Gen 4th elves must follow this branch workflow.",
+  "run_id": "20260819-040036-02625194",
+  "provenance": "session:auto triage 20260819-040036-02625194 (session start)",
+  "routed_at": "2026-08-19T04:05:12Z"
+ },
+ {
+  "kind": "skill",
+  "destination": 
+"/root/.hermes/skills/tools/rpm-proxy-le-cert-doctrine/SKILL.md",
+  "summary": "Certs renewal mechanics (2026-08-17, rpm/mrxlab stack): the Let's 
+Encrypt 11-domain cert covers ALL proxy hosts and streams. The certbot 
+renew_hook (rpm-certload.sh) performs full-object PUTs to load ",
+  "run_id": "20260819-053941-a694ad12",
+  "provenance": "session:auto triage 20260819-053941-a694ad12 (memory-write 
+threshold crossed)",
+  "routed_at": "2026-08-19T05:41:57Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/ciel-state-db-diagnostic/SKILL.md",
+  "summary": "# Ciel state.db diagnostic\n\nUse when Ciel (Hermes) becomes 
+unresponsive or hangs.\n\n## Lesson (2026-08-24)\nIf Ciel is unresponsive, FIRST
+suspect ~/.hermes/state.db corruption. This has happened before",
+  "run_id": "20260829-071150-32947254",
+  "provenance": "session:auto triage 20260829-071150-32947254 (memory-write 
+threshold crossed)",
+  "routed_at": "2026-08-29T07:13:40Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/autonomy-v3-operations/SKILL.md",
+  "summary": "# Autonomy v3 operations (2026-08-29)\n\nUse when operating the 
+autonomy framework or running the daily pulse.\n\n## Structure\n- charter.md: R1
+/ R2 / R3 tiers, you-drive-I-audit model.\n- changelog.md: au",
+  "run_id": "20260829-071150-32947254",
+  "provenance": "session:auto triage 20260829-071150-32947254 (memory-write 
+threshold crossed)",
+  "routed_at": "2026-08-29T07:13:40Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/routed-skill/SKILL.md",
+  "summary": "Use when accessing TrueNAS SSH or managing SSH access 
+grants.\n\nTrueNAS root SSH access (2026-08-30): Omar granted PERMANENT root 
+access — truenas_ed25519 key on root@192.168.1.15 is KEEP and to be use",
+  "run_id": "20260831-004938-9a36f34e",
+  "provenance": "session:auto triage 20260831-004938-9a36f34e (test: force 
+fallback via 1s timeout)",
+  "routed_at": "2026-08-31T00:50:31Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/hermes-config-gotchas/SKILL.md",
+  "summary": "# Hermes config set gotchas\n\nUse when running hermes config set 
+to write keys under provider models whose names contain dots (e.g. qwen3.8-27b),
+or when a config value lands in the wrong key and doesn",
+  "run_id": "20260831-010533-000db4ee",
+  "provenance": "session:auto triage 20260831-010533-000db4ee (test: force 
+fallback via 1s timeout)",
+  "routed_at": "2026-08-31T01:07:13Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/pve-lxc-static-ip/SKILL.md",
+  "summary": "# PVE LXC static IP rule (Omar, 2026-08-31)\n\nUse when creating 
+new LXC containers on the PVE host.\n\n- ALL new LXC containers must be created 
+STATIC immediately at creation — NO DHCP.\n- At pct create u",
+  "run_id": "20260831-015255-8b9325e6",
+  "provenance": "session:auto triage 20260831-015255-8b9325e6 (memory-write 
+threshold crossed)",
+  "routed_at": "2026-08-31T01:54:39Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/bazzite-vllm-swap/SKILL.md",
+  "summary": "# Bazzite vLLM current state (2026-08-31)\n\nUse when swapping the
+model on the bazzite vLLM or checking what :8090 currently serves.\n\n- BAZZITE 
+is AWQ-only now (2026-08-31): :8090 serves philbert440/Qw",
+  "run_id": "20260831-061317-24c99744",
+  "provenance": "session:auto triage 20260831-061317-24c99744 (memory-write 
+threshold crossed)",
+  "routed_at": "2026-08-31T06:17:13Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/minimax-h3-local-comfyui/SKILL.md",
+  "summary": "## H3 ref-order rule (validated, 2026-08-30 missionary 
+session)\n\nbuild_scene_wf.py maps refs list ORDER to ref slots -> first entry =
+ref_image_0 = ...\n- (rest of entry truncated in triage inventory)",
+  "run_id": "20260831-061317-24c99744",
+  "provenance": "session:auto triage 20260831-061317-24c99744 (memory-write 
+threshold crossed)",
+  "routed_at": "2026-08-31T06:17:13Z"
+ },
+ {
+  "kind": "skill",
+  "destination": 
+"/root/.hermes/skills/tools/hermes-proxy-relay-config/SKILL.md",
+  "summary": "hermes-proxy-relay config now SINGLE-SOURCE (2026-08-31, commit 
+b87f859): 4 parse sites collapsed to relay/config.py (load/reload/snapshot); hot
+reload + …",
+  "run_id": "20260901-014637-cc0b1a0a",
+  "provenance": "session:auto triage 20260901-014637-cc0b1a0a (memory-write 
+threshold crossed)",
+  "routed_at": "2026-09-01T01:47:09Z"
+ },
+ {
+  "kind": "skill",
+  "destination": 
+"/root/.hermes/skills/tools/hermes-compression-config/SKILL.md",
+  "summary": "COMPRESSION (2026-08-31): auxiliary.compression pinned to provider
+custom:opencode-zen-free-proxied + model big-pickle + reasoning_effort none + 
+timeout 600. …",
+  "run_id": "20260901-014637-cc0b1a0a",
+  "provenance": "session:auto triage 20260901-014637-cc0b1a0a (memory-write 
+threshold crossed)",
+  "routed_at": "2026-09-01T01:47:09Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/memtriage-changelog/SKILL.md",
+  "summary": "memtriage changelog generator (2026-08-31): 
+/root/.hermes/scripts/memtriage-summary.py — stdlib-only script that re-reads 
+~/.memtriage/ledger.json + …",
+  "run_id": "20260901-014637-cc0b1a0a",
+  "provenance": "session:auto triage 20260901-014637-cc0b1a0a (memory-write 
+threshold crossed)",
+  "routed_at": "2026-09-01T01:47:09Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/memtriage-identity-guard/SKILL.md",
+  "summary": "# memtriage identity guard\n\nUse when running memory triage 
+(memtriage) and evaluating an entry for eviction.\n\nRule (2026-09-01): the 
+executor REFUSES any action that removes a user entry carrying iden",
+  "run_id": "20260901-022051-7e1d324c",
+  "provenance": "session:auto triage 20260901-022051-7e1d324c (memory-write 
+threshold crossed)",
+  "routed_at": "2026-09-01T02:21:18Z"
+ },
+ {
+  "kind": "skill",
+  "destination": 
+"/root/.hermes/skills/tools/admin-keys-scrypt-scan-fix/SKILL.md",
+  "summary": "# POST /admin/keys reducer 'hang' — root cause & fix 
+(2026-08-31)\n\nUse when POST /admin/keys appears to hang in the admin 
+middleware.\n\nROOT CAUSE: not a hang — O(N) scrypt scan in the admin 
+middleware",
+  "run_id": "20260901-022051-7e1d324c",
+  "provenance": "session:auto triage 20260901-022051-7e1d324c (memory-write 
+threshold crossed)",
+  "routed_at": "2026-09-01T02:21:18Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/model-fallback-chain/SKILL.md",
+  "summary": "# Current model fallback chain (2026-09-01, Omar)\n\nUse when 
+configuring or re-checking the Hermes model fallback chain.\n\nSIMPLIFIED to 
+EXACTLY: primary big-pickle (relay custom:opencode-zen-free-proxi",
+  "run_id": "20260901-055317-cc311c80",
+  "provenance": "session:auto triage 20260901-055317-cc311c80 (session start)",
+  "routed_at": "2026-09-01T05:53:50Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/relay-fallback-chain/SKILL.md",
+  "summary": "Relay Fallback chain (2026-09-01): primary big-pickle (relay 
+custom:opencode-zen-free-proxied :4002) → fallback qwen3.8-27b 
+(custom:local-qwen :8090, vllm). Use when configuring/re-checking the Hermes",
+  "run_id": "20260901-065749-56663aad",
+  "provenance": "session:auto triage 20260901-065749-56663aad (session start)",
+  "routed_at": "2026-09-01T06:58:03Z"
+ },
+ {
+  "kind": "skill",
+  "destination": 
+"/root/.hermes/skills/tools/hermes-proxy-relay-routes/SKILL.md",
+  "summary": "# hermes-proxy-relay G3 router split (2026-09-01, commit 
+d651e4c)\n\nUse when working on hermes-proxy-relay routing or refactoring 
+handler families.\n\n- /health, /v1+/go, /admin handler families extracte",
+  "run_id": "20260901-080544-3e61d1cb",
+  "provenance": "session:auto triage 20260901-080544-3e61d1cb (memory-write 
+threshold crossed)",
+  "routed_at": "2026-09-01T08:06:00Z"
+ },
+ {
+  "kind": "skill",
+  "destination": 
+"/root/.hermes/skills/tools/hermes-opencode-provider-cleanup/SKILL.md",
+  "summary": "# opencode provider cleanup (2026-09-01)\n\nUse when configuring 
+opencode providers on the fleet.\n\n- Fleet now uses TWO providers: 
+opencode-zen-proxied = relay :4002/v1 (SOCKS5 pool) and opencode-zen-no",
+  "run_id": "20260901-080544-3e61d1cb",
+  "provenance": "session:auto triage 20260901-080544-3e61d1cb (memory-write 
+threshold crossed)",
+  "routed_at": "2026-09-01T08:06:00Z"
+ },
+ {
+  "kind": "skill",
+  "destination": 
+"/root/.hermes/skills/tools/hermes-proxy-relay-restart-pitfall/SKILL.md",
+  "summary": "# hermes-proxy-relay restart dead window (2026-09-01)\n\nUse when 
+restarting the hermes-proxy-relay systemd user service.\n\n- Every systemctl 
+--user restart costs a ~90s dead window — uvicorn graceful sh",
+  "run_id": "20260901-080544-3e61d1cb",
+  "provenance": "session:auto triage 20260901-080544-3e61d1cb (memory-write 
+threshold crossed)",
+  "routed_at": "2026-09-01T08:06:00Z"
+ },
+ {
+  "kind": "skill",
+  "destination": 
+"/root/.hermes/skills/tools/fleet-tooling-first-class-plugins/SKILL.md",
+  "summary": "# Fleet tooling posture (Omar, 2026-09-01)\n\nUse when deciding 
+how to package Omar's reusable infrastructure pieces or fleet tooling.\n\n- 
+Omar's reusable infra pieces should be FIRST-CLASS Hermes plugin",
+  "run_id": "20260901-175056-a9e449bc",
+  "provenance": "session:auto triage 20260901-175056-a9e449bc (memory-write 
+threshold crossed)",
+  "routed_at": "2026-09-01T17:51:22Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/pre-install-disk-check/SKILL.md",
+  "summary": "# pre-install-disk-check\n\nUse before ANY 
+download/install/unpack: verify the target filesystem has room for the planned 
+write plus cushion (max 2GB / 15%).\n\n- Never start a download that won't 
+fit.\n- ",
+  "run_id": "20260901-175056-a9e449bc",
+  "provenance": "session:auto triage 20260901-175056-a9e449bc (memory-write 
+threshold crossed)",
+  "routed_at": "2026-09-01T17:51:22Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/udm-network-ops/SKILL.md",
+  "summary": "# UDM operator profile\n\nUse when operating the UDM/udm 
+profile.\n\nOperator profile ~/.hermes/profiles/udm (alias udm, model big-pickle
+via custom:opencode-zen-proxied relay :4002). Skill udm-network-op",
+  "run_id": "20260902-021401-706b711f",
+  "provenance": "session:auto triage 20260902-021401-706b711f (memory-write 
+threshold crossed)",
+  "routed_at": "2026-09-02T02:14:14Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/spacetime-llm-install/SKILL.md",
+  "summary": "# Spacetime-LLM proxy topology (2026-09-01)\n\nUse when operating 
+the spacetime-llm proxy fleet.\n\nProxy CT113 :4000, DB spacetime-llm-v2 on hub 
+CT112. 250 decodo DC proxies (dc.decodo.com:10001-10250, s",
+  "run_id": "20260902-021401-706b711f",
+  "provenance": "session:auto triage 20260902-021401-706b711f (memory-write 
+threshold crossed)",
+  "routed_at": "2026-09-02T02:14:14Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/spacetimedb-hub-ops/SKILL.md",
+  "summary": "# Spacetime-LLM admin ops via STDB HTTP (2026-09-01)\n\nUse when 
+running admin/SQL operations against the SpacetimeDB hub.\n\nSQL over HTTP = 
+POST http://192.168.1.112:8015/v1/database/spacetime-llm-v2/sq",
+  "run_id": "20260902-021401-706b711f",
+  "provenance": "session:auto triage 20260902-021401-706b711f (memory-write 
+threshold crossed)",
+  "routed_at": "2026-09-02T02:14:14Z"
+ },
+ {
+  "kind": "skill",
+  "destination": 
+"/root/.hermes/skills/tools/spacetime-llm-fallback-admin/SKILL.md",
+  "summary": "# Spacetime-LLM fallback admin API\n\nUse when configuring 
+fallback model groups on the spacetime-llm proxy.\n\n- USER-FACING fallback 
+tools are exposed as HTTP admin API — no raw STDB reducers needed.\n- ",
+  "run_id": "20260902-065236-64c6d449",
+  "provenance": "session:auto triage 20260902-065236-64c6d449 (memory-write 
+threshold crossed)",
+  "routed_at": "2026-09-02T06:54:47Z"
+ },
+ {
+  "kind": "skill",
+  "destination": 
+"/root/.hermes/skills/tools/rgb-hardware-project-doctrine/SKILL.md",
+  "summary": "# RGB/hardware project doctrine (2026-09)\n\nUse when working on 
+RGB/hardware projects with Omar.\n\n- Omar is the EYES — he reports physical 
+light state the assistant cannot see; trust his visual observa",
+  "run_id": "20260902-065236-64c6d449",
+  "provenance": "session:auto triage 20260902-065236-64c6d449 (memory-write 
+threshold crossed)",
+  "routed_at": "2026-09-02T06:54:47Z"
+ },
+ {
+  "kind": "skill",
+  "destination": 
+"/root/.hermes/skills/tools/spacetime-llm-openapi-sync/SKILL.md",
+  "summary": "Use when hand-authoring or syncing an OpenAPI spec for 
+spacetime-llm.\n\n## OpenAPI spec sync lesson (2026-09-03)\n\n- Wave-14 synced 
+OpenAPI spec with wired routes: 41 → 75 paths.\n- The spec is hand-auth",
+  "run_id": "20260903-162920-1a444db4",
+  "provenance": "session:auto triage 20260903-162920-1a444db4 (session start)",
+  "routed_at": "2026-09-03T16:29:52Z"
+ },
+ {
+  "kind": "skill",
+  "destination": 
+"/root/.hermes/skills/tools/parallel-agent-resource-limits/SKILL.md",
+  "summary": "# Parallel agent resource limits       \n (2026-09-03)\n\nUse when
+spawning multiple subagents that each launch heavy    \n processes 
+(Playwright/Chrome/vite dev servers).\n\nLesson (2026-09-03, e2e     \n c",
+  "run_id": "20260903-193800-66c40bd1",
+  "provenance": "session:auto triage 20260903-193800-66c40bd1 (memory-write 
+threshold crossed)",
+  "routed_at": "2026-09-03T19:40:33Z"
+ },
+ {
+  "kind": "skill",
+  "destination": 
+"/root/.hermes/skills/tools/s---kill-ownership-adoption/SKILL.md",
+  "summary": "# Skill ownership & adoption                  \n 
+(2026-09-03)\n\nUse when a skill cannot be patched by the curator or when      
+\n adopting a user-created skill.\n\nLesson (2026-09-03): wave-coverage-drive ",
+  "run_id": "20260903-193800-66c40bd1",
+  "provenance": "session:auto triage 20260903-193800-66c40bd1 (memory-write 
+threshold crossed)",
+  "routed_at": "2026-09-03T19:40:33Z"
+ },
+ {
+  "kind": "skill",
+  "destination": 
+"/root/.hermes/skills/tools/spacetime-llm-git-conventions/SKILL.md",
+  "summary": "# spacetime-llm git conventions\n\nUse when committing code to the
+spacetime-llm repo.\n\n- Commits MUST be authored omiinaya 
+<omiinaya@gmail.com>.\n- CT113 has NO git user identity by default -> git 
+falls",
+  "run_id": "20260903-231442-d4bb35b4",
+  "provenance": "session:auto triage 20260903-231442-d4bb35b4 (memory-write 
+threshold crossed)",
+  "routed_at": "2026-09-03T23:14:59Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/hermes-commit-as-you-go/SKILL.md",
+  "summary": "# Commit-as-you-go doctrine\n\nUse when running long multi-wave 
+work.\n\nPush your commits as you go — do NOT wait until fully done. Land 
+verified increments to origin/main at meaningful checkpoints, auth",
+  "run_id": "20260904-032849-29c57e7e",
+  "provenance": "session:auto triage 20260904-032849-29c57e7e (memory-write 
+threshold crossed)",
+  "routed_at": "2026-09-04T03:29:01Z"
+ },
+ {
+  "kind": "skill",
+  "destination": 
+"/root/.hermes/skills/tools/spacetime-llm-spam-cleanup/SKILL.md",
+  "summary": "# spacetime-llm spam cleanup (2026-09-04)\n\nUse when cleaning 
+spam issues on the spacetime-llm repo or re-running the kanban spam-close 
+script.\n\n- All 7,428 spam open issues closed (kanban-worker bug d",
+  "run_id": "20260904-083405-a01abf64",
+  "provenance": "session:auto triage 20260904-083405-a01abf64 (memory-write 
+threshold crossed)",
+  "routed_at": "2026-09-04T08:34:25Z"
+ },
+ {
+  "kind": "skill",
+  "destination": 
+"/root/.hermes/skills/tools/spacetime-llm-e2e-coverage/SKILL.md",
+  "summary": "# spacetime-llm E2E + coverage (2026-09-04)\n\nUse when checking 
+spacetime-llm test suite status or coverage baseline.\n\n- Web E2E goal MET: 
+720/720 suite green; HONEST coverage 91% lines (29,565/32,487,",
+  "run_id": "20260904-083405-a01abf64",
+  "provenance": "session:auto triage 20260904-083405-a01abf64 (memory-write 
+threshold crossed)",
+  "routed_at": "2026-09-04T08:34:25Z"
+ },
+ {
+  "kind": "skill",
+  "destination": 
+"/root/.hermes/skills/tools/github-actions-yaml-anchor-gotcha/SKILL.md",
+  "summary": "# GitHub Actions YAML anchor gotcha\n\nUse when authoring GitHub 
+Actions workflow YAML.\n\nYAML step anchors (- *anchor aliasing a step map with 
+uses:) are REJECTED — the whole run fails instantly (0s, 0 ",
+  "run_id": "20260905-183915-1ab3e5e2",
+  "provenance": "session:auto triage 20260905-183915-1ab3e5e2 (session start)",
+  "routed_at": "2026-09-05T18:43:42Z"
+ },
+ {
+  "kind": "skill",
+  "destination": 
+"/root/.hermes/skills/tools/spacetime-llm-ci-toolchain/SKILL.md",
+  "summary": "# spacetime-llm CI toolchain pinning\n\nUse when debugging red CI 
+in the spacetime-llm repo.\n\nAudit (2026-09-05): CI red 55/60 runs — root 
+cause: unpinned toolchain: stable in all Rust jobs; rustc 1.97→",
+  "run_id": "20260905-183915-1ab3e5e2",
+  "provenance": "session:auto triage 20260905-183915-1ab3e5e2 (session start)",
+  "routed_at": "2026-09-05T18:43:42Z"
+ },
+ {
+  "kind": "skill",
+  "destination": 
+"/root/.hermes/skills/tools/hermes-proxy-relay-graceful-shutdown/SKILL.md",
+  "summary": "# hermes-proxy-relay graceful shutdown\n\nUse when debugging 
+hermes-proxy-relay shutdown/restart or SSE drain behavior.\n\nHardening 
+(2026-09-05, a7ff17e): graceful-shutdown stream drain — RELAY_STREAM_SH",
+  "run_id": "20260905-183915-1ab3e5e2",
+  "provenance": "session:auto triage 20260905-183915-1ab3e5e2 (session start)",
+  "routed_at": "2026-09-05T18:43:42Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/ciel-local-model-policy/SKILL.md",
+  "summary": "## Render vs local-model rule (2026-09-07, Omar)\n\nRule: do NOT 
+run renders while the local model is serving.\n\nWorking default: stick to 
+big-pickle via the opencode-zen-proxied relay; keep local qwen3.",
+  "run_id": "20260907-214329-bb11d672",
+  "provenance": "session:auto triage 20260907-214329-bb11d672 (memory-write 
+threshold crossed)",
+  "routed_at": "2026-09-07T21:48:24Z"
+ },
+ {
+  "kind": "skill",
+  "destination": 
+"/root/.hermes/skills/tools/pve-ca-certificates-gotcha/SKILL.md",
+  "summary": "# PVE host CA certificate gotcha (LightBWS, 2026-09-07)\n\nUse 
+when running update-ca-certificates on the PVE host, or when custom CA edits to 
+/etc/ssl/certs/ca-certificates.crt seem to vanish.\n\n- updat",
+  "run_id": "20260907-223228-c848b185",
+  "provenance": "session:auto triage 20260907-223228-c848b185 (memory-write 
+threshold crossed)",
+  "routed_at": "2026-09-07T22:36:41Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/truenas-ops-doctrine/SKILL.md",
+  "summary": "mrx-thunder NFSv4 (2026-09-07): thunder storage.cfg pins options 
+vers=3, but cloud uses vers=4.2 and works on same TrueNAS stack (sec=sys, no 
+idmapd needed).",
+  "run_id": "20260908-002916-258ed684",
+  "provenance": "session:auto triage 20260908-002916-258ed684 (memory-write 
+threshold crossed)",
+  "routed_at": "2026-09-08T00:31:02Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/thin-client-webui-ops/SKILL.md",
+  "summary": "# Thin-client webUI operations\n\nUse when working on the 
+thin-client webUI (real accounts, 2FA, settings).\n\nCurrent feature state 
+(2026-09-08):\n- Real accounts: register/login with scrypt password hash",
+  "run_id": "20260908-090904-449d260b",
+  "provenance": "session:auto triage 20260908-090904-449d260b (session start)",
+  "routed_at": "2026-09-08T09:11:37Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/legiontd2-operations/SKILL.md",
+  "summary": "# legiontd2 operations — LT2 v16 relaunch pitfall 
+(2026-09-08)\n\nUse when relaunching or operating Legion TD 2 in the legiontd2 
+project.\n\n- The scheduled-task (schtask) relaunch SILENTLY FAILS — do not",
+  "run_id": "20260908-090904-449d260b",
+  "provenance": "session:auto triage 20260908-090904-449d260b (session start)",
+  "routed_at": "2026-09-08T09:11:37Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/family-scripts-ops/SKILL.md",
+  "summary": "# Family scripts doctrine — work-style addendum\n\nUse when 
+wrapping recurring non-trivial ops into reusable scripts for Omar (auth, probes,
+config, vault, git-sync, relay flip) in /root/hermes-org/fami",
+  "run_id": "20260908-113944-b2d0221e",
+  "provenance": "session:auto triage 20260908-113944-b2d0221e (session start)",
+  "routed_at": "2026-09-08T11:41:33Z"
+ },
+ {
+  "kind": "skill",
+  "destination": 
+"/root/.hermes/skills/tools/vendor-client-source-verification/SKILL.md",
+  "summary": "# Vendor client-source verification\n\nUse when an 
+upstream-contract failure (vendor CLI/API misbehaves against our integration) 
+defies our own code's logic.\n\n## Rule (2026-09-09, Omar)\n- For upstream-c",
+  "run_id": "20260909-130750-10a89aa9",
+  "provenance": "session:auto triage 20260909-130750-10a89aa9 (session start)",
+  "routed_at": "2026-09-09T13:10:46Z"
+ },
+ {
+  "kind": "user",
+  "destination": "USER.md",
+  "summary": "User expects a time-boxed work sprint (\"upgrade for the next 
+hour\", \"continue working\") to run the FULL time budget: declaring the goal 
+complete after a packed",
+  "run_id": "20260913-071317-a610b5b6",
+  "provenance": "session:auto triage 20260913-071317-a610b5b6 (memory-write 
+threshold crossed)",
+  "routed_at": "2026-09-13T07:16:41Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/timed-goals-doctrine/SKILL.md",
+  "summary": "# Timed goals doctrine\n\nUse when running an active timed goal 
+(time-boxed sprint).\n\nRule (Omar, 2026-09): during an active timed goal I 
+NEVER stop to wait on an answer to a question — no 'shall I / wh",
+  "run_id": "20260914-044243-f562efc1",
+  "provenance": "session:auto triage 20260914-044243-f562efc1 (memory-write 
+threshold crossed)",
+  "routed_at": "2026-09-14T04:44:17Z"
+ },
+ {
+  "kind": "consolidate",
+  "destination": "user#consolidated",
+  "summary": "Git CARDINAL (2026-09-07, Omar): git-init projects; commit E",
+  "run_id": "20260915-230311-a6d12f25",
+  "provenance": "session:auto triage 20260915-230311-a6d12f25 (session start)",
+  "routed_at": "2026-09-15T23:05:34Z"
+ },
+ {
+  "kind": "skill",
+  "destination": "/root/.hermes/skills/tools/pve-git-identity--gotcha/SKILL.md",
+  "summary": "Git author leak (\n2026-09-10): the GLOBAL git identity on this 
+host is Omar Minaya <omar@mrxlab.net> (the\n vault-guarded REAL name). 
+Committing without a local ...",
+  "run_id": "20260917-121626-79e80497",
+  "provenance": "session:auto triage 20260917-121626-79e80497 (session start)",
+  "routed_at": "2026-09-17T12:20:36Z"
+ },
+ {
+  "kind": "skill",
+  "destination": 
+"/root/.hermes/skills/tools/relay-zen-403-fingerprint/SKILL.md",
+  "summary": "Relay v1.12.0 (2026-09-18, cb97c8b) zen forge: opencode-zen 
+free-tier 403s are a BODY-TEMPLATE fingerprint (11 opencode tool names + 
+stream:true), NOT 
+
+Reply with ONLY the non-empty JSON array, no prose, no markdown fences. The
+array must contain at least one action. If an entry needs no change, still
+emit a "keep" action for it (action='keep', with its target and index and a
+helper reason) — NEVER return an empty array. The same inventory entry must
+not appear in more than one action.
+[{
+  "action": 
+"keep|consolidate|route-to-skill|route-to-profile|route-to-provider|route-to-scr
+ipt|evict-to-quarantine|split",
+  "target": "memory|user",
+  "index": 0,
+  "text": "...",
+  "reason": "short justification",
+  "skill_name": "...", "script_name": "...", "script_ext": "py",
+  "keep": "<for split: the clause that stays>",
+  "routes": [<routing actions>]
+}]
+
+Initializing agent...
+────────────────────────────────────────
+
+
+┌─ Reasoning ──────────────────────────────────────────────────────────────────┐
+The memory store is at 94.67%, over budget. Need to free space. Entries are project pointers — route to skills where they're reusable procedures, provider otherwise
+.
+
+Let me plan:
+
+memory 0: projects symlink layout → route-to-skill (project-layout) or provider. It's environment-critical-ish
+. Route to skill "project-layout-thunder".
+memory 1: thin-client fleet (684 chars) → route-to-skill "thin-client-fleet" (thin-client-webui-ops exists but fleet
+ topology distinct). Route to skill.
+memory 2: FedEx tracking recipe → route-to-skill "fedex-tracking".
+memory 3: oem/log dev blog + writing rule → route-to-skill "oem-dev-blog".
+memory 4: hermes-hearth → route-to-skill "hermes-hearth".
+memory 5: gantree private repo (33 chars) → route-to-provider.
+memory 6: oem-ui → route-to-skill "oem-ui".
+memory 7: oem-cdn (637) → route-to-skill "oem-cdn".
+memory 8: oem-portfolio → route-to-skill "oem-portfolio".
+memory 9: spacetime-ab → route-to-skill "spacetime-adblocker".
+
+All memory entries routed out → frees 3787 chars basically. That's good.
+
+user entries: 0 is a big blob mixing identity + conventions (commit/push, LAN-BIND) → split: keep identity
+ core, route conventions to skill. user 1: verification bar doctrine → route-to-skill "verification-bar". user 2: work-style expectations → route-to-skill "deep-investigation-doctrine"? Ledger has timed
+-goals-doctrine; but this is about durable systemd units. Route to skill "durable-service-doctrine".
+
+Write the JSON.
+└──────────────────────────────────────────────────────────────────────────────┘
+
+╭─ ☤ Hermes ───────────────────────────────────────────────────────────────────╮
+[{"action":"route-to-skill","target":"memory","index":0,"skill_name":"thunder-project-layout","reason":"Environment layout fact, stable and reusable each time a project path is used","text":"# Thunder project layout\n\nUse when locating or creating project clones on the mrx-thunder host.\n\n- Projects live on /mnt/pve/mrx-thunder/projects.\n- /root/projects is a symlink to the thunder projects dir (top-level SAME-PATH symlink).\n- Per-project symlinks are SAME-PATH too, so the visible path always matches the real path.\n- Non-plugin clones live on thunder; plugin-managed clones follow their plugin location rules."},
+{"action":"route-to-skill","target":"memory","index":1,"skill_name":"thin-client-fleet-topology","reason":"Fleet topology is a reusable operating reference, not working memory","text":"# Thin-client fleet topology\n\nUse when targeting a thin client for exec, webUI, or model work.\n\n- Hub: :7900 (exec loopback), :7901/:7902 (webUI).\n- dma-pc 192.168.1.63 (mrx-mini)\n- mrx-predator 192.168.1.115 (omiin)\n- bazzite 192.168.1.19 (mrx)\n- omar-mac 192.168.1.51 (kenia)\n- All fleet members are thin clients on the same LAN; bind services to 0.0.0.0."},
+{"action":"route-to-skill","target":"memory","index":2,"skill_name":"fedex-tracking-scrape","reason":"Solved multi-step scraping recipe — a procedure, needed again for any carrier tracker","text":"# FedEx tracking scrape (SOLVED 2026-09-24, pure-cffi)\n\nUse when scraping FedEx tracking pages where direct requests get blocked.\n\nRecipe:\n1. Warm up a stock-Chrome session through a Decodo residential IP to mint FRESH cookies.\n2. Replay those cookies with curl_cffi using the chrome136 impersonation profile.\n3. No Selenium/Chromium-automation stack required — pure cffi.\n\nSame pattern applies to other cookie-walled carriers: mint fresh cookies on a residential IP, then replay with curl_cffi."},
+{"action":"route-to-skill","target":"memory","index":3,"skill_name":"oem-dev-blog","reason":"Blog URL + writing rule is a reusable content workflow","text":"# oem/log dev blog\n\nUse when writing or publishing to the dev blog.\n\n- URL: https://omiinaya.github.io/oem-log/ — public, MIT licensed, Astro, auto-deploys.\n- Local checkout: /root/projects/dev-blog.\n- Writing rule (Omar, strong): publish real, working technical detail — no filler posts."},
+{"action":"route-to-skill","target":"memory","index":4,"skill_name":"hermes-hearth","reason":"Project operational reference (service, ports, surfaces) — belongs in a skill","text":"# hermes-hearth (2026-09-25)\n\nUse when operating or deploying hermes-hearth.\n\n- Repo omiinaya/hermes-hearth is PRIVATE. Local path /root/browser-hub.\n- systemd --user unit hearth, listens on :8791, venv on thunder.\n- 3 surfaces: daemon, ..."},
+{"action":"route-to-provider","target":"memory","index":5,"text":"gantree: PRIVATE omiinaya/gantree","reason":"One-line private repo pointer — scene context, no reusable procedure"},
+{"action":"route-to-skill","target":"memory","index":6,"skill_name":"oem-ui","reason":"Design-system operating reference incl. rename history and test count","text":"# oem-ui — house design system (2026-09-26)\n\nUse when building or extending the house design system.\n\n- oem-ui is the OFFICIAL name; it was previously called cli-mono.\n- Repo omiinaya/oem-ui is PRIVATE; local path /root/projects/oem-ui.\n- 175 tests. Skill ..."},
+{"action":"route-to-skill","target":"memory","index":7,"skill_name":"oem-cdn","reason":"Locked-design project state + test commands — reusable build/verify reference","text":"# oem-cdn (2026-09-27)\n\nUse when working on oem-cdn.\n\n- Repo omiinaya/oem-cdn is PRIVATE; local path /root/projects/oem-cdn.\n- Design is LOCKED. All 7 phases built.\n- Tests: 114 unit tests, 100 e2e assertions via scripts/e2e.sh."},
+{"action":"route-to-skill","target":"memory","index":8,"skill_name":"oem-portfolio","reason":"Static-site content architecture — reusable editing reference","text":"# oem-portfolio\n\nUse when editing the portfolio site.\n\n- Path /root/projects/oem-portfolio; static Astro built on oem-ui.\n- All copy lives in src/data/content.ts.\n- PROJECTS section is deliberately empty: 12 placeholder slots (the old 14 entries were removed)."},
+{"action":"route-to-skill","target":"memory","index":9,"skill_name":"spacetime-adblocker","reason":"DNS adblocker project state — operational reference","text":"# spacetime-ab — DNS adblocker on SpacetimeDB\n\nUse when operating the spacetime-adblocker.\n\n- Repo omiinaya/spacetime-ab is PRIVATE; local path /root/spacetime-ab.\n- Remediation COMPLETE 2026-09-27 — parity 20/21 (9 proven live, 1 outstanding)."},
+{"action":"split","target":"user","index":0,"keep":"Omar Minaya, cyber-name SULLEN. Ciel is my partner, never 'Papa'. VIEWING: I view oem sites on my iPHONE in Safari, so WebKit is the engine that matters - verify layout in WebKit at an iPhone viewport.","routes":[{"action":"route-to-skill","skill_name":"team-doctrine","text":"Conventions (Omar): commit EARLY+OFTEN and push EVERY commit, authored omiinaya, never root. LAN-BIND: always bind to 0.0.0.0, never localhost. When building or reviewing any oem site, verify layout in WebKit at an iPhone viewport — that is the engine Omar actually views on."}],"reason":"Entry mixes identity core with git/bind conventions; splitting keeps identity in the profile and moves reusable doctrine to the existing team-doctrine skill"},
+{"action":"route-to-skill","target":"user","index":1,"skill_name":"verification-bar","reason":"Reusable testing doctrine, not identity — full profile relief per target rule","text":"# Verification bar (Omar, demonstrated 2026-09-27 on code-spaces)\n\nUse when declaring work verified or a suite green.\n\n- A green suite is not proof. Fix the real bugs the tests were green over.\n- Mutation-check every new test: it must genuinely fail when the fix is reverted.\n- Mocks must mirror the real response body; a test asserting on its own invented fixture proves nothing.\n- Verify layout in real WebKit at an iPhone viewport, not just desktop."},
+{"action":"route-to-skill","target":"user","index":2,"skill_name":"durable-service-doctrine","reason":"Work-style doctrine about fault response and durable systemd units — reusable procedure","text":"# Durable-service doctrine (Omar)\n\nUse when a device or user reports a suspected fault, or when asked to keep something running.\n\n- Expects deep investigation and end-to-end proof, not reassurance.\n- If he says \"can you X the second it's back\", the fix must be a durable systemd unit (3s poll, all lanes) — never a session-bound loop."}]
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+Resume this session with:
+  hermes --resume 20260927_170748_262373 -p cerveau
+
+Session:        20260927_170748_262373
+Duration:       27s
+Messages:       2 (1 user, 0 tool calls)
+
+

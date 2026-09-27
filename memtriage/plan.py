@@ -61,53 +61,98 @@ def _array_spans(text: str) -> List[str]:
     (the outer block is what json.loads cares about); nested arrays within the
     plan's own objects are handled by the outer balanced scan, which takes the
     whole top-level array.
+
+    DANGER 2026-09-27 (twice). This scanner has to survive the ECHOED PROMPT.
+    ``hermes chat`` echoes the whole query before the answer, and that echo
+    contains near-miss brackets (a ledger summary with "[3h]", an inventory
+    array the model truncated with "…"). Two distinct failures shipped from
+    here:
+
+    1. An unbalanced ``[`` used to ``break`` the scan, discarding everything
+       after it — including the real plan 31KB later — so every run silently
+       degraded to the all-keep fallback while reporting success.
+    2. Resyncing with ``i += 1`` fixed that but produced a SPURIOUS span that
+       started mid-structure and ran 38KB to the reply's end, swallowing the
+       real plan whole.
+
+    A bracket-balanced span is not necessarily a JSON array — that is exactly
+    what a mis-nested one looks like. So a span is only yielded once it
+    actually parses as JSON, and a non-parsing span is resynced past instead of
+    consumed. Deciding this inside the scanner (not in the caller) is what
+    stops one bad bracket from hiding a good plan.
     """
     spans: List[str] = []
     i = 0
     n = len(text)
     while i < n:
-        ch = text[i]
-        if ch == "[":
-            depth = 0
-            in_string = False
-            escape = False
-            j = i
-            closed = False
-            while j < n:
-                c = text[j]
-                if in_string:
-                    if escape:
-                        escape = False
-                    elif c == "\\":
-                        escape = True
-                    elif c == '"':
-                        in_string = False
-                    j += 1
-                    continue
-                if c == '"':
-                    in_string = True
-                elif c == "[":
-                    depth += 1
-                elif c == "]":
-                    depth -= 1
-                    if depth == 0:
-                        spans.append(text[i : j + 1])
-                        i = j + 1
-                        closed = True
-                        break
-                j += 1
-            if not closed:
-                # DANGER 2026-09-27: this used to `break`, abandoning the REST
-                # of the reply. A single unbalanced "[" anywhere — e.g. a ledger
-                # summary containing "[3h]" that the balanced scan mis-nests —
-                # silently discarded the real plan sitting further down, so triage
-                # fell back to an all-keep no-op and freed nothing while
-                # reporting success. Resync past this "[" and keep scanning;
-                # only the abandoned span is lost, not everything after it.
-                i += 1
+        if text[i] != "[":
+            i += 1
+            continue
+        end = _balanced_end(text, i)
+        if end is None:
+            # Unbalanced all the way to EOF. A LATER "[" can still balance on
+            # its own, so resync one char in rather than abandoning the rest of
+            # the reply — the earlier `break` here is what made defect 14 hide
+            # the real plan behind a stray bracket in the echoed prompt.
+            i += 1
+            continue
+        candidate = text[i : end + 1]
+        if _is_json_array(candidate):
+            spans.append(candidate)
+            i = end + 1
         else:
+            # Bracket-balanced but not valid JSON: a mis-nested span. Resync
+            # one char in so the real array inside it is still reachable.
             i += 1
     return spans
+
+
+def _balanced_end(text: str, start: int) -> Optional[int]:
+    """Index of the ``]`` closing the ``[`` at *start*, or None if unbalanced."""
+    depth = 0
+    in_string = False
+    escape = False
+    j = start
+    n = len(text)
+    while j < n:
+        c = text[j]
+        if in_string:
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == '"':
+                in_string = False
+            j += 1
+            continue
+        if c == '"':
+            in_string = True
+        elif c == "[":
+            depth += 1
+        elif c == "]":
+            depth -= 1
+            if depth == 0:
+                return j
+        j += 1
+    return None
+
+
+def _is_json_array(candidate: str) -> bool:
+    """True when *candidate* is a JSON array. Control chars repaired first.
+
+    Uses the lenient object_hook on purpose: a control character inside a
+    string (the ledger is full of them) is repairable, so such a span is a
+    REAL array and must be yielded for the caller to parse. What we are
+    rejecting here is a span that is not an array at all — the mis-nested
+    fragment — and that fails to load under any settings.
+    """
+    if not candidate.lstrip()[:1] == "[":
+        return False
+    try:
+        loaded = json.loads(_auto_escape_controls_in_strings(candidate))
+    except (json.JSONDecodeError, ValueError):
+        return False
+    return isinstance(loaded, list)
 
 
 def parse_plan(raw: str) -> List[Dict[str, Any]]:
