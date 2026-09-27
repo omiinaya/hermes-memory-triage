@@ -322,3 +322,63 @@ def test_restoring_the_oldest_snapshot_keeps_that_snapshot(tmp_path):
     assert (data / "snapshots" / oldest).exists(), (
         "the restored-from snapshot must survive the restore"
     )
+
+
+# --- defect 6: auto mode + a 40s blocking dispatch on the tool path -------
+#
+# config.json ships mode="auto" with a 600s Cerveau timeout. post_tool_call
+# is synchronous INSIDE the user's tool call, so enabling as-is would stall a
+# memory write for the length of a real triage. The run is now off-thread and
+# requires an explicit opt-in.
+
+def test_unattended_writes_require_an_explicit_opt_in(monkeypatch):
+    import importlib
+    monkeypatch.delenv("MEMTRIAGE_AUTO_RUN", raising=False)
+    monkeypatch.delenv("MEMTRIAGE_ALLOW_WRITES", raising=False)
+    p = importlib.import_module("plugin")
+    assert p._auto_run_allowed() is False, (
+        "auto-run must be off unless explicitly enabled"
+    )
+
+
+def test_auto_run_alone_is_not_enough(monkeypatch):
+    import importlib
+    monkeypatch.setenv("MEMTRIAGE_AUTO_RUN", "1")
+    monkeypatch.delenv("MEMTRIAGE_ALLOW_WRITES", raising=False)
+    p = importlib.import_module("plugin")
+    assert p._auto_run_allowed() is False
+
+
+def test_both_brakes_allow_an_unattended_run(monkeypatch):
+    import importlib
+    monkeypatch.setenv("MEMTRIAGE_AUTO_RUN", "1")
+    monkeypatch.setenv("MEMTRIAGE_ALLOW_WRITES", "1")
+    p = importlib.import_module("plugin")
+    assert p._auto_run_allowed() is True
+
+
+def test_a_read_only_memory_call_never_triggers_triage(monkeypatch):
+    """A `memory` READ crosses the same hook; it must not start a triage."""
+    import importlib
+    p = importlib.import_module("plugin")
+    called = []
+    monkeypatch.setattr(
+        p, "_maybe_run_triage", lambda reason: called.append(reason)
+    )
+    p._on_post_tool_call(
+        tool_name="memory", status="ok", args={"action": "view"},
+    )
+    assert not called, "a read-only memory call started a triage"
+
+
+def test_a_failed_memory_call_never_triggers_triage(monkeypatch):
+    import importlib
+    p = importlib.import_module("plugin")
+    called = []
+    monkeypatch.setattr(
+        p, "_maybe_run_triage", lambda reason: called.append(reason)
+    )
+    p._on_post_tool_call(
+        tool_name="memory", status="error", args={"action": "add"},
+    )
+    assert not called

@@ -20,7 +20,9 @@ All heavy logic lives in the stdlib-only ``memtriage`` package.
 from __future__ import annotations
 
 import logging
+import os
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -72,6 +74,43 @@ def _load_cfg() -> Config:
         return Config()
 
 
+def _auto_run_allowed() -> bool:
+    """Whether an unattended triage may run without a human in the loop.
+
+    Two independent brakes, both defaulting to the cautious answer:
+
+    * ``MEMTRIAGE_AUTO_RUN`` -- an explicit opt-in. Unset or "0" means the
+      plugin never writes to the stores on its own; the user runs
+      ``memtriage run`` when they want it. This is the default because
+      ``mode: auto`` in config.json was set long before the guards in this
+      executor existed, so "auto" does not imply the current safety rules
+      were ever considered.
+    * ``MEMTRIAGE_ALLOW_WRITES`` -- an extra brake on top of that for the
+      case where auto-run is enabled but writes are not wanted yet (plan and
+      report only).
+
+    Either can be set to "1"/"true" to permit the behaviour.
+    """
+    def _truthy(name: str) -> bool:
+        return os.environ.get(name, "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+
+    if not _truthy("MEMTRIAGE_AUTO_RUN"):
+        logger.debug(
+            "memtriage: over threshold but MEMTRIAGE_AUTO_RUN is not set; "
+            "not running an unattended triage. Run `memtriage run` manually."
+        )
+        return False
+    if not _truthy("MEMTRIAGE_ALLOW_WRITES"):
+        logger.debug(
+            "memtriage: MEMTRIAGE_AUTO_RUN set but MEMTRIAGE_ALLOW_WRITES is "
+            "not; not writing to the stores unattended."
+        )
+        return False
+    return True
+
+
 # -- hook callbacks ----------------------------------------------------------
 
 def _on_post_tool_call(**kwargs: Any) -> None:
@@ -110,6 +149,20 @@ def _on_session_start(**kwargs: Any) -> None:
 
 
 def _maybe_run_triage(reason: str) -> None:
+    """Run an over-threshold triage, OFF the caller's thread.
+
+    post_tool_call fires synchronously inside the user's own tool call, and a
+    triage shells out to Cerveau with a 600s timeout. Measured live: a real
+    triage prompt (45KB) takes ~40s, so running this inline stalled the
+    session that triggered it for the better part of a minute -- and in auto
+    mode that stall happens on a memory write, which is exactly when the user
+    is waiting on a result.
+
+    The hook returns immediately; the work happens on a daemon thread and the
+    result is still surfaced via _notify_result. Threshold, cooldown and
+    awaiting-approval are all checked BEFORE the thread starts, so this does
+    not change how often a triage runs -- only how long the caller waits.
+    """
     cfg = _load_cfg()
     if not state.is_over_threshold(cfg):
         return
@@ -118,11 +171,19 @@ def _maybe_run_triage(reason: str) -> None:
     if state.awaiting_approval(cfg):
         # A plan is already queued for review — never stomp it with a fresh one.
         return
-    try:
-        result = run_triage(cfg, reason=reason, force=True)
-        _notify_result(result)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("memtriage auto-run failed: %s", exc)
+    if not _auto_run_allowed():
+        return
+
+    def _work() -> None:
+        try:
+            result = run_triage(cfg, reason=reason, force=True)
+            _notify_result(result)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("memtriage auto-run failed: %s", exc)
+
+    threading.Thread(
+        target=_work, name="memtriage-auto", daemon=True
+    ).start()
 
 
 # -- in-session notification -------------------------------------------------
