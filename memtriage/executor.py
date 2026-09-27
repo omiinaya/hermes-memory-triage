@@ -290,9 +290,25 @@ class Executor:
         # Quarantine writes are buffered until a removal has survived every
         # guard, so a refused eviction leaves no phantom record.
         self._pending_quarantine: List[Tuple[str, str]] = []
+        # Removal notes per target, committed only when that target's store
+        # is actually rewritten. Keyed by target because the rebuild loop
+        # handles each target independently.
+        self._provisional: Dict[str, List[str]] = {}
 
     def _note(self, msg: str) -> None:
         self.applied.append(msg)
+
+    def _note_removal(self, target: str, msg: str) -> None:
+        """Narrate a REMOVAL, which a later guard can still revoke.
+
+        A routing action has already written its skill/provider/script by the
+        time it is narrated, so those claims are safe in `applied`. A removal
+        is not: the staleness check, the identity guard and the safety floor
+        all run AFTER the action, so an eviction that is later refused must
+        not appear in `applied` — doing so reported "quarantined 2990 chars"
+        for a run that wrote nothing.
+        """
+        self._provisional.setdefault(target, []).append(msg)
 
     def _note_pending(self, msg: str) -> None:
         self.pending.append(msg)
@@ -313,6 +329,7 @@ class Executor:
         self.applied = []
         self.pending = []
         self.errors = []
+        self._provisional = {}
         # Refusals the user must act on. Distinct from errors: an identity
         # guard refusal on an over-budget target is correct behaviour that
         # nonetheless leaves the store unrelieved, and it must be visible.
@@ -510,8 +527,11 @@ class Executor:
                 else 0.0  # memory: only refuse a complete empty
             )
             # Refuse when the plan actually removes something AND the post
-            # state falls below the target's floor.
-            if removals[target] and limit and post_fraction < floor:
+            # state falls below the target's floor. The comparison is
+            # strictly-less: landing exactly ON the floor is allowed, and a
+            # float comparison that rejected 10.0% vs 10% would refuse the
+            # very split that relieves a store pinned at its wall.
+            if removals[target] and limit and post_fraction < floor - 1e-9:
                 self.errors.append(
                     f"target '{target}' would drop to "
                     f"{post_chars}/{limit} chars ({post_fraction*100:.0f}%) "
@@ -561,16 +581,33 @@ class Executor:
                         self._pending_quarantine.append(
                             (target, original[target][i])
                         )
-                freed = sum(
-                    len(original[target][i])
-                    for i in removals[target]
-                    if 0 <= i < len(original[target])
-                )
-                self.applied.append(f"freed {freed} chars [{target}]")
+                # A split REPLACES the source with a shorter clause, so the
+                # sum of removed lengths is not the saving — it ignores the
+                # append. Report the real net change in stored characters.
+                freed = memory_store.char_count(original[target]) - memory_store.char_count(final)
+                if freed:
+                    self.applied.append(
+                        f"freed {freed} chars [{target}] "
+                        f"({memory_store.char_count(original[target])}"
+                        f" -> {memory_store.char_count(final)})"
+                    )
+                # This target's removal notes are now true: the store was
+                # rewritten. Notes for OTHER targets stay provisional until
+                # those targets are handled, so a guard that revokes one
+                # target's removal never launders another target's success.
+                self.applied.extend(self._provisional.pop(target, []))
+
+        # Removal notes still provisional belong to targets whose store was
+        # never rewritten (a guard revoked the removal, or final ==
+        # original). Report them as not-committed, never as a success.
+        for _t, msgs in self._provisional.items():
+            for m in msgs:
+                self.errors.append(f"planned but not committed ({_t}): {m}")
+        self._provisional = {}
 
         # Quarantine is flushed ONLY for removals that survived every guard and
-        # were actually written. A refused eviction therefore leaves no record,
-        # so `restore` can never re-append an entry that is still live.
+        # were actually written, so `restore` can never re-append an entry that
+        # is still live.
         for q_target, q_text in self._pending_quarantine:
             try:
                 quarantine.evict(
@@ -743,7 +780,10 @@ class Executor:
         for i in idxs:
             expected[(target, i)] = entries[i]
         appends[target].append(merged)
-        self._note(f"consolidated {len(idxs)} entries into {len(merged)} chars [{target}]")
+        self._note_removal(
+            target,
+            f"consolidated {len(idxs)} entries into {len(merged)} chars [{target}]",
+        )
         self._ledger("consolidate", f"{target}#consolidated", merged[:60])
 
     def _do_skill(self, a, original) -> None:
@@ -923,9 +963,10 @@ class Executor:
         stated = a.get("text")
         if isinstance(stated, str) and stated:
             expected[(target, index)] = stated
-        self._note(
+        self._note_removal(
+            target,
             f"split {target}#{index} ({len(source_text)} chars) → kept "
-            f"{len(keep_text)} chars, routed {len(routed)} clause(s)"
+            f"{len(keep_text)} chars, routed {len(routed)} clause(s)",
         )
         self._ledger(
             "split", f"{target}#split#{self._run_id}", keep_text[:80]
@@ -953,4 +994,4 @@ class Executor:
         stated = a.get("text")
         if isinstance(stated, str) and stated:
             expected[(target, idx)] = stated
-        self._note(f"quarantined {len(victim_text)} chars [{target}]")
+        self._note_removal(target, f"quarantined {len(victim_text)} chars [{target}]")
