@@ -687,3 +687,47 @@ def test_the_run_action_still_writes_when_both_brakes_are_set(monkeypatch):
 
     mod._handle_tool({"action": "run"})
     assert seen["mode"] == "auto", f"brakes blocked a deliberate auto run: {seen}"
+
+
+# --- defect 14: one unbalanced "[" silently discarded the real plan -------
+#
+# _array_spans did `break` on an unbalanced span, abandoning the REST of the
+# reply. A ledger summary containing "[3h]" in the echoed prompt corrupted the
+# scan, so the genuine 13-action Cerveau plan sitting further down was never
+# seen: triage fell back to an all-keep no-op and reported success while
+# freeing nothing. Found only by running against the real live reply.
+
+
+def test_an_unbalanced_bracket_does_not_discard_the_rest_of_the_reply():
+    from memtriage.plan import parse_plan
+    plan_json = (
+        '[{"action":"route-to-provider","target":"memory","index":0,'
+        '"text":"real content that must survive"}]'
+    )
+    # A ledger record whose summary holds a stray "[" before the real plan.
+    reply = (
+        'prior ledger echo: [{"kind":"skill","summary":"every 3h [3h] cron"}]\n'
+        + "prose in between\n"
+        + plan_json
+    )
+    out = parse_plan(reply)
+    assert len(out) == 1
+    assert out[0]["action"] == "route-to-provider"
+    assert out[0]["text"] == "real content that must survive"
+
+
+def test_the_real_live_reply_now_yields_the_cerveau_plan():
+    """The exact captured reply: used to parse as the prompt's echoed example."""
+    import pathlib
+    from memtriage.plan import parse_plan
+    raw = pathlib.Path("/root/.hermes/cache/scratch/cerveau_raw.txt")
+    if not raw.exists():
+        pytest.skip("captured reply not present")
+    text = raw.read_text()
+    i, j = text.index("===STDOUT==="), text.index("===STDERR===")
+    out = parse_plan(text[i + 10 : j].strip())
+    assert len(out) == 13
+    assert not any(a.get("_source") == "deterministic-fallback" for a in out)
+    kinds = {a["action"] for a in out}
+    assert "route-to-provider" in kinds
+    assert "route-to-skill" in kinds

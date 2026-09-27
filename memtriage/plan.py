@@ -72,6 +72,7 @@ def _array_spans(text: str) -> List[str]:
             in_string = False
             escape = False
             j = i
+            closed = False
             while j < n:
                 c = text[j]
                 if in_string:
@@ -92,10 +93,18 @@ def _array_spans(text: str) -> List[str]:
                     if depth == 0:
                         spans.append(text[i : j + 1])
                         i = j + 1
+                        closed = True
                         break
                 j += 1
-            if depth != 0:
-                break  # unbalanced from here; give up scanning
+            if not closed:
+                # DANGER 2026-09-27: this used to `break`, abandoning the REST
+                # of the reply. A single unbalanced "[" anywhere — e.g. a ledger
+                # summary containing "[3h]" that the balanced scan mis-nests —
+                # silently discarded the real plan sitting further down, so triage
+                # fell back to an all-keep no-op and freed nothing while
+                # reporting success. Resync past this "[" and keep scanning;
+                # only the abandoned span is lost, not everything after it.
+                i += 1
         else:
             i += 1
     return spans
