@@ -93,6 +93,13 @@ def run_triage(
 
     if cfg.mode == "auto":
         provenance = f"session:auto triage {run_id} ({reason})"
+        # Persist the plan EVEN THOUGH it is applied unattended. The manual
+        # branch saves it for review; the auto branch used to save nothing, so
+        # an unattended run left a report describing actions that no longer
+        # existed anywhere on disk and could not be audited or replayed. The
+        # applied-plan marker still refuses a replay, so this is a record,
+        # not an invitation to re-run it.
+        plan_mod.save_plan(cfg, run_id, actions)
         summary = Executor(cfg).execute_plan(actions, run_id, provenance)
         state_mod.record_execution(cfg, run_id, summary)
         result["execution"] = summary

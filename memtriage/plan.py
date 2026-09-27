@@ -278,6 +278,19 @@ def validate(actions: List[Any]) -> List[Dict[str, Any]]:
                 f"Action #{n} ({kind}) must target 'memory', got "
                 f"{a.get('target')!r}."
             )
+        # An EXPLICIT target, on every action that points at an entry. A
+        # missing one used to be silently defaulted to "memory", so a model
+        # that routed a PROFILE fact without saying so wrote it into
+        # MEMORY.md while the removal bookkeeping still removed the profile
+        # entry it belonged to -- a live auto run replaced the 338-char
+        # identity core with a 65-char stub. Guessing the store is never safe.
+        if kind in ("keep", "evict-to-quarantine", "consolidate") or "index" in a:
+            tgt = a.get("target")
+            if tgt not in ("memory", "user"):
+                raise PlanValidationError(
+                    f"Action #{n} ({kind}) must state an explicit 'target' of "
+                    f"'memory' or 'user'; got {tgt!r}."
+                )
         if kind == "consolidate":
             entries = a.get("entries", [])
             if not isinstance(entries, list) or len(entries) < 2:

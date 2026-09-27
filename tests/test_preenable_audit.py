@@ -1016,7 +1016,7 @@ def test_two_identical_plans_are_not_ambiguous():
     """
     from memtriage.plan import parse_plan
 
-    plan = [{"action": "keep", "index": 0, "text": "t", "reason": "r"}]
+    plan = [{"action": "keep", "target": "memory", "index": 0, "text": "t", "reason": "r"}]
     reply = json.dumps(plan) + "\nand again:\n" + json.dumps(plan)
     out = parse_plan(reply)
     assert len(out) == 1
@@ -1025,8 +1025,8 @@ def test_two_identical_plans_are_not_ambiguous():
 def test_two_different_equal_length_plans_still_refuse():
     from memtriage.plan import parse_plan, PlanValidationError
 
-    a = [{"action": "keep", "index": 0, "text": "one", "reason": "r"}]
-    b = [{"action": "keep", "index": 0, "text": "two", "reason": "r"}]
+    a = [{"action": "keep", "target": "memory", "index": 0, "text": "one", "reason": "r"}]
+    b = [{"action": "keep", "target": "memory", "index": 0, "text": "two", "reason": "r"}]
     with pytest.raises(PlanValidationError, match="Ambiguous"):
         parse_plan(json.dumps(a) + "\n" + json.dumps(b))
 
@@ -1177,3 +1177,74 @@ def test_the_decisions_action_is_reachable_from_the_tool():
     plugin = importlib.import_module("plugin")
     assert "decisions" in plugin.SUBCOMMANDS
     assert "decisions" in plugin.TOOL_SCHEMA["parameters"]["properties"]["action"]["enum"]
+
+
+# --- an omitted target silently wrote a PROFILE fact to MEMORY.md ----------
+#
+# Found by turning on `auto` and reading the decision log. A live
+# unattended run produced two `route-to-skill` actions with NO "target" key.
+# `validate()` accepted them (a missing target defaulted to "memory"), the
+# executor routed the text into MEMORY.md, and the removal bookkeeping
+# removed the PROFILE entry it belonged to. Net effect: the 338-char
+# identity core in USER.md was replaced by a 65-char stub, unattended.
+#
+# The store is never something to guess at.
+
+def test_an_action_naming_an_entry_must_state_its_target():
+    from memtriage.plan import validate, PlanValidationError
+
+    for acts in (
+        [{"action": "keep", "index": 0, "reason": "r"}],
+        [{"action": "evict-to-quarantine", "index": 0, "reason": "r"}],
+        [{"action": "consolidate", "entries": [0, 1], "text": "m", "reason": "r"}],
+        [{"action": "route-to-skill", "index": 0, "skill_name": "s", "text": "t"}],
+    ):
+        with pytest.raises(PlanValidationError, match="explicit 'target'"):
+            validate(acts)
+
+
+def test_a_bogus_target_is_refused_too():
+    from memtriage.plan import validate, PlanValidationError
+
+    with pytest.raises(PlanValidationError, match="explicit 'target'"):
+        validate([{"action": "keep", "target": "everything", "index": 0, "reason": "r"}])
+
+
+def test_an_explicit_target_of_either_store_is_accepted():
+    from memtriage.plan import validate
+
+    for tgt in ("memory", "user"):
+        out = validate([{"action": "keep", "target": tgt, "index": 0, "reason": "r"}])
+        assert out[0]["target"] == tgt
+
+
+def test_a_route_with_no_entry_index_needs_no_target():
+    """route-to-provider / route-to-script carry no index -- there is no
+    store entry to name, so requiring a target there would be noise."""
+    from memtriage.plan import validate
+
+    out = validate([{"action": "route-to-skill", "skill_name": "s", "text": "real content"}])
+    assert out[0]["skill_name"] == "s"
+
+
+def test_the_prompt_tells_cerveau_to_state_the_target():
+    from memtriage.cerveau import PROMPT_TEMPLATE
+
+    assert "explicitly" in PROMPT_TEMPLATE
+    i = PROMPT_TEMPLATE.find("Every action that names an entry")
+    assert i > 0, "the explicit-target rule is missing from the prompt"
+
+
+def test_auto_mode_persists_the_plan_it_applied():
+    """Only the manual branch used to save the plan, so an unattended run
+    left a report describing actions that no longer existed on disk."""
+    from memtriage import triage as T
+    import inspect
+
+    src = inspect.getsource(T.run_triage)
+    start = src.index('if cfg.mode == "auto":')
+    end = src.index("    else:", start)
+    auto = src[start:end]
+    assert "save_plan" in auto, (
+        "auto mode must persist the plan it applied, or the run is unauditable"
+    )

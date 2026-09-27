@@ -106,6 +106,9 @@ Staleness signals (from the user's doctrine):
 4. Explicit "forget this" instructions from the user.
 
 Safety rules (non-negotiable):
+- **Every action that names an entry MUST state "target": "memory" or
+  "user" explicitly.** Never omit it — an omitted target is REJECTED, and
+  guessing wrong would move a profile fact into the wrong store.
 - Identity, security, and environment-critical facts are NEVER evicted; at
   worst they are demoted to the provider or consolidated.
 - Evictions are reversible (quarantine); do not over-evict. When in doubt,
