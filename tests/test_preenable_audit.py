@@ -519,3 +519,80 @@ def test_the_store_lock_is_the_same_file_the_built_in_tool_locks():
         f"memtriage locks {locking._lock_path(store)} but the built-in memory "
         f"tool locks {builtin}: they do not exclude each other"
     )
+
+
+# --- defect 11: a headless run marked itself delivered --------------------
+#
+# _inject returned None and both notify sites called mark_notified
+# unconditionally, so a run with no channel (cron, CLI) recorded itself as
+# shown and every later session start suppressed it forever. The user never
+# sees that report.
+
+
+def test_a_run_with_no_channel_is_not_marked_notified(tmp_path):
+    import importlib.util as u
+    from pathlib import Path as _P
+    from memtriage import state as st_mod
+    from memtriage.config import Config
+
+    spec = u.spec_from_file_location(
+        "mtplug_notify",
+        str(_P(__file__).resolve().parents[1] / "plugin" / "__init__.py"))
+    plug = u.module_from_spec(spec); sys.modules["mtplug_notify"] = plug
+    spec.loader.exec_module(plug)
+
+    plug._ctx = None                       # no active channel
+    plug._notify_result({
+        "triggered": True, "run_id": "RUN-SILENT", "mode": "manual",
+        "plan": [{"action": "keep"}], "report_path": "", "execution": None,
+    })
+    runs = st_mod.notified_runs(Config())
+    assert "RUN-SILENT" not in runs, (
+        "the run was marked delivered although nothing was ever shown; it "
+        "will now be suppressed permanently"
+    )
+
+
+# --- defect 12: the auto-run blocked the tool call past Hermes' 30s bound --
+
+
+def test_the_auto_triage_hook_returns_immediately(tmp_path, monkeypatch):
+    """post_tool_call is in _HOOK_TIMEOUT_BOUNDED_HOOKS (30s default).
+
+    A triage shells out to Cerveau with a 600s timeout and a measured ~40s
+    prompt, so running it inline was abandoned mid-run and eventually
+    suppressed. The work must happen off the caller's thread.
+    """
+    import importlib.util as u
+    import threading
+    import time as _t
+    from pathlib import Path as _P
+    from memtriage import store as _st
+    from memtriage.config import Config
+
+    spec = u.spec_from_file_location(
+        "mtplug_hook",
+        str(_P(__file__).resolve().parents[1] / "plugin" / "__init__.py"))
+    plug = u.module_from_spec(spec); sys.modules["mtplug_hook"] = plug
+    spec.loader.exec_module(plug)
+
+    monkeypatch.setenv("MEMTRIAGE_AUTO_RUN", "1")
+    monkeypatch.setenv("MEMTRIAGE_ALLOW_WRITES", "1")
+    _st.write_entries(_st.TARGET_MEMORY, ["x" * (_st.char_limit("memory") + 100)])
+
+    started = threading.Event()
+    def slow(cfg, reason=None, force=False):
+        started.set()
+        _t.sleep(2.0)
+        return {"triggered": False}
+    monkeypatch.setattr(plug, "run_triage", slow)
+    monkeypatch.setattr(plug, "_notify_result", lambda r: None)
+
+    t0 = _t.time()
+    plug._on_post_tool_call(tool_name="memory", status="ok", args={"action": "add"})
+    elapsed = _t.time() - t0
+    assert elapsed < 1.0, (
+        f"the hook blocked the tool call for {elapsed:.1f}s; Hermes abandons "
+        f"a bounded hook at 30s"
+    )
+    assert started.wait(2.0), "the triage never started on the worker"

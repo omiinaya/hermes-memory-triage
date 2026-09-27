@@ -210,15 +210,24 @@ def _maybe_run_triage(reason: str) -> None:
 
 # -- in-session notification -------------------------------------------------
 
-def _inject(text: str) -> None:
-    """Best-effort injection of a message into the active conversation."""
+def _inject(text: str) -> bool:
+    """Best-effort injection of a message into the active conversation.
+
+    Returns whether the message was actually DELIVERED. Callers must only
+    mark a run notified on True: a headless run (cron, CLI, no gateway
+    channel) previously marked itself delivered while nothing was ever shown,
+    so every later session start saw the id in ``notified_runs`` and
+    suppressed the report permanently. Verified 2026-09-27.
+    """
     if _ctx is None:
         logger.debug("memtriage: no session context; cannot inject message")
-        return
+        return False
     try:
         _ctx.inject_message(text, role="user")
+        return True
     except Exception as exc:  # noqa: BLE001
         logger.warning("memtriage: inject_message failed: %s", exc)
+        return False
 
 
 def _report_body(report_path: str) -> str:
@@ -251,8 +260,9 @@ def _notify_result(result: Dict[str, Any]) -> None:
             "before it runs."
         )
     body = f"\n\n{report}" if report else ""
-    _inject(head + body)
-    if run_id:
+    # Only mark delivered if it WAS delivered. A headless run (cron / CLI /
+    # no channel) must stay eligible for the next session start.
+    if _inject(head + body) and run_id:
         state.mark_notified(_load_cfg(), run_id)
 
 
@@ -306,8 +316,8 @@ def _notify_awaiting(cfg: Config, run_id: str) -> None:
         "Nothing applied yet — run /memtriage review (or approve) to act on it."
     )
     body = f"\n\n{report}" if report else ""
-    _inject(head + body)
-    state.mark_notified(cfg, run_id)
+    if _inject(head + body):
+        state.mark_notified(cfg, run_id)
 
 
 # -- slash command -----------------------------------------------------------
