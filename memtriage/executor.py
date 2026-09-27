@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import ledger, locking, quarantine, snapshots, store as memory_store
-from .config import Config
+from .config import Config, _default_data_dir
 
 # Marker file recording which run ids have already landed. A plan's indices
 # are positional, so a replay resolves them against a shifted store and would
@@ -197,6 +197,34 @@ def _provider_api_key(cfg) -> str:
     return ""
 
 
+def _production_data_dir() -> str:
+    """The real, non-sandboxed data root, ignoring MEMTRIAGE_HOME.
+
+    ``config._default_data_dir`` honours MEMTRIAGE_HOME, so it tracks the
+    sandbox and cannot answer "is this run isolated?". This resolves the
+    production location: MEMTRIAGE_HOME unset, or the path a real
+    ~/.memtriage install would use.
+    """
+    from . import config as _cfgmod
+
+    saved = os.environ.pop("MEMTRIAGE_HOME", None)
+    try:
+        prod = _cfgmod._default_data_dir()
+        real_config = Path(os.path.expanduser("~/.memtriage")) / "config.json"
+        if real_config.is_file():
+            try:
+                raw = json.loads(real_config.read_text(encoding="utf-8"))
+                pinned = raw.get("data_dir")
+                if pinned:
+                    prod = Path(os.path.expanduser(str(pinned)))
+            except (OSError, ValueError, UnicodeDecodeError):
+                pass
+        return str(prod)
+    finally:
+        if saved is not None:
+            os.environ["MEMTRIAGE_HOME"] = saved
+
+
 def _dispatch_to_provider(cfg, text: str, scene_path: str = "memtriage/triage.md") -> str:
     """Best-effort knowledge write to the provider gateway. Returns a notice.
 
@@ -213,6 +241,28 @@ def _dispatch_to_provider(cfg, text: str, scene_path: str = "memtriage/triage.md
       - Body:   {session_id, messages:[{role, content}]}; tenancy defaults
         to the default bucket when omitted.
     """
+    # A sandboxed run (isolated data_dir / HERMES_HOME) must never write to the
+    # REAL production gateway. The provider is an external side effect that no
+    # data_dir redirect covers, so isolation has to be enforced explicitly --
+    # a dry run against a copied store previously pushed three real entries
+    # into production memory.
+    # The check is against the PRODUCTION data root (~/.memtriage, possibly
+    # pinned by a real config.json), not against whatever _default_data_dir()
+    # resolves to -- that helper is itself MEMTRIAGE_HOME-aware, so it moves
+    # with the sandbox and would never detect isolation.
+    isolated = os.environ.get("MEMTRIAGE_ALLOW_PROVIDER", "").strip()
+    data_dir = str(getattr(cfg, "data_dir", ""))
+    prod_dir = _production_data_dir()
+    home = os.environ.get("HERMES_HOME", "")
+    if not isolated and (
+        data_dir != prod_dir
+        or (home and home != os.path.expanduser("~/.hermes"))
+    ):
+        return (
+            "pending (refusing to write to the production gateway from a "
+            "non-default data root; set MEMTRIAGE_ALLOW_PROVIDER=1 to "
+            "override)"
+        )
     api_key = _provider_api_key(cfg)
     if not api_key:
         return "pending (no provider api key in env: TDAI_LLM_API_KEY / MEMORY_TENCENTDB_LLM_API_KEY)"
@@ -334,6 +384,11 @@ class Executor:
         self.errors = []
         self._provisional = {}
         self._snapshot_records = []
+        # Which source entries each pending append REPLACES, per target.
+        # Keyed by provenance, not text: a consolidation paraphrases its
+        # sources, so only the executor knows which append is a substitute.
+        # None = the append replaces nothing and must always be kept.
+        self._append_sources: Dict[str, List[Optional[frozenset]]] = {}
         # Refusals the user must act on. Distinct from errors: an identity
         # guard refusal on an over-budget target is correct behaviour that
         # nonetheless leaves the store unrelieved, and it must be visible.
@@ -542,6 +597,22 @@ class Executor:
                     f"< {floor*100:.0f}% floor — refused; source entries kept"
                 )
                 removals[target] = set()  # keep everything in place
+                # A split/consolidate replacement only makes sense as the
+                # SUBSTITUTE for entries we just decided not to remove. With
+                # the source restored, appending the replacement would leave
+                # the store holding both copies — a refusal that made the
+                # store BIGGER. Withdraw any replacement that was derived
+                # from a now-revoked removal.
+                dropped = self._withdraw_replacement(
+                    target, appends[target], original[target]
+                )
+                if dropped:
+                    self.errors.append(
+                        f"withdrew {dropped} replacement entr"
+                        f"{'y' if dropped == 1 else 'ies'} for '{target}': "
+                        f"their source entries were kept, so the merged text "
+                        f"would have duplicated live content"
+                    )
                 kept = list(original[target])
                 final = kept + appends[target]
             # The "never empty memory" rule was dead: floor==0.0 made
@@ -552,6 +623,16 @@ class Executor:
                     "source entries kept"
                 )
                 removals[target] = set()
+                dropped = self._withdraw_replacement(
+                    target, appends[target], original[target]
+                )
+                if dropped:
+                    self.errors.append(
+                        f"withdrew {dropped} replacement entr"
+                        f"{'y' if dropped == 1 else 'ies'} for 'memory': their "
+                        f"source entries were kept, so the merged text would "
+                        f"have duplicated live content"
+                    )
                 final = list(original[target])
             # Do not push a target PAST its own limit — once over, every
             # built-in `append` is refused for the rest of the session.
@@ -806,7 +887,9 @@ class Executor:
         removals[target].update(idxs)
         for i in idxs:
             expected[(target, i)] = entries[i]
-        appends[target].append(merged)
+        # This append SUBSTITUTES for the entries just removed. If a later
+        # guard revokes the removal, the merged text must be withdrawn too.
+        self._add_append(target, appends, merged, sources=frozenset(idxs))
         self._note_removal(
             target,
             f"consolidated {len(idxs)} entries into {len(merged)} chars [{target}]",
@@ -853,7 +936,8 @@ class Executor:
                 "char limit; routing into it would worsen the pressure"
             )
             raise ValueError("route-to-profile refused: user store at/over limit")
-        appends["user"].append(text)
+        # Replaces nothing — this is new text, so it must never be withdrawn.
+        self._add_append("user", appends, text, sources=None)
         self._note(f"routed to profile ({len(text)} chars)")
         self._ledger("user", "USER.md", text[:200])
 
@@ -955,7 +1039,15 @@ class Executor:
                 if r.get("action") == "route-to-skill":
                     self._do_skill(r, original)
                 elif r.get("action") == "route-to-provider":
-                    self._do_provider(r, original)
+                    # _do_provider REPORTS failure by returning False (it does
+                    # not raise), so the return value must be checked. Treating
+                    # a False as success routed the clause away from the store
+                    # while it was never written anywhere -- silent loss.
+                    if not self._do_provider(r, original):
+                        raise ValueError(
+                            "route-to-provider did not confirm the write; "
+                            "its clause stays in the store"
+                        )
                 elif r.get("action") == "route-to-script":
                     self._do_script(r, original)
                 else:
@@ -984,7 +1076,11 @@ class Executor:
         replacement = keep_text
         if retained:
             replacement = keep_text + "\n" + "\n".join(retained)
-        appends[target].append(replacement)
+        # Substitutes for the source entry ONLY when every clause routed away
+        # successfully. If a route failed, `retained` carries content that
+        # exists nowhere else and must survive any guard revocation.
+        sources = frozenset({index}) if not retained else None
+        self._add_append(target, appends, replacement, sources=sources)
         # Only claim an expectation when the plan stated the source text; a
         # self-assigned value would make the staleness check a no-op.
         stated = a.get("text")
@@ -998,6 +1094,61 @@ class Executor:
         self._ledger(
             "split", f"{target}#split#{self._run_id}", keep_text[:80]
         )
+
+    def _add_append(
+        self,
+        target: str,
+        appends: Dict[str, List[str]],
+        text: str,
+        sources: Optional[frozenset] = None,
+    ) -> None:
+        """Append text, recording WHICH source entries it replaces.
+
+        Provenance is tracked explicitly rather than inferred later from text
+        similarity. A consolidation paraphrases its sources, so a content
+        heuristic cannot tell a replacement from genuinely new text — and
+        getting that wrong either duplicates live content or silently drops a
+        clause. ``sources`` is None for an append that replaces nothing (a
+        plain route-to-profile, or a split clause whose route failed).
+        """
+        appends[target].append(text)
+        self._append_sources.setdefault(target, []).append(sources)
+
+    def _withdraw_replacement(
+        self, target: str, appends: List[str], original: List[str]
+    ) -> int:
+        """Remove appends that were substitutes for now-revoked removals.
+
+        ``consolidate`` and ``split`` both work by removing their source
+        entries and appending a replacement. If a later guard revokes the
+        removal, the replacement is orphaned: the source text is still in the
+        store AND the merged copy would be appended next to it. A guard that
+        refused an action must never leave the store larger than before.
+
+        Selection is by recorded provenance (:meth:`_add_append`), never by
+        text matching. An append with no sources carries content that exists
+        nowhere else and is always kept.
+        """
+        sources = self._append_sources.get(target) or []
+        if not sources:
+            return 0
+        # Drop any append whose source entries are ALL still live: the
+        # replacement is then a duplicate of content the store kept.
+        keep_idx = []
+        dropped = 0
+        for i, src in enumerate(sources[: len(appends)]):
+            if src and all(j < len(original) for j in src):
+                dropped += 1
+                continue
+            keep_idx.append(i)
+        if not dropped:
+            return 0
+        appends[:] = [appends[i] for i in keep_idx]
+        self._append_sources[target] = [sources[i] for i in keep_idx]
+        # The removal notes for this target described a change that is no
+        # longer happening.
+        self._provisional.pop(target, None)
+        return dropped
 
     def _do_evict(self, a, original, removals, expected) -> None:
         target = a.get("target", "memory")

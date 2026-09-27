@@ -146,7 +146,21 @@ class Config:
         data_dir = kwargs.pop("data_dir", None)
         cfg = cls(**kwargs)
         if data_dir:
-            cfg.data_dir = Path(os.path.expanduser(str(data_dir)))
+            pinned = Path(os.path.expanduser(str(data_dir)))
+            # A pinned data_dir is honoured only when it is INSIDE the
+            # effective root. Otherwise a config copied from a live install
+            # (or one written by an older version) silently redirects every
+            # read and write to the real ~/.memtriage even though
+            # MEMTRIAGE_HOME says otherwise — which is how a test suite ends
+            # up mutating production state while appearing isolated.
+            effective = _default_data_dir()
+            if pinned != effective and effective not in pinned.parents:
+                raise ValueError(
+                    f"config pins data_dir to {pinned}, which is outside the "
+                    f"active data root {effective}. Refusing to use it: unset "
+                    f"data_dir, or point it inside the root."
+                )
+            cfg.data_dir = pinned
         return cfg
 
     def save(self) -> None:

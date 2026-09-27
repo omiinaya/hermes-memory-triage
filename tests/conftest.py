@@ -36,6 +36,14 @@ def isolated_env(monkeypatch, tmp_path):
     monkeypatch.setenv("MEMTRIAGE_HOME", str(data))
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("CERVEAU_MAX_PAYLOAD", "2000")
+    # A test that reaches the REAL gateway writes into production memory --
+    # the exact failure the 2026-09-27 pre-enablement audit found (a "fully
+    # isolated" dry run pushed three real entries). Redirect the provider at
+    # a closed port for the whole session so a missed guard is a loud
+    # connection error, not a silent production write. A test that genuinely
+    # needs the wire must opt in per-test via its own monkeypatch.
+    monkeypatch.setenv("TDAI_LLM_API_KEY", "")
+    monkeypatch.setenv("MEMORY_TENCENTDB_LLM_API_KEY", "")
     yield tmp_path
 
 

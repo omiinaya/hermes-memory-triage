@@ -128,12 +128,17 @@ def _prune(data_dir: Path, target: str, keep: int) -> int:
     if keep <= 0:
         return 0
     try:
+        # Sort by the timestamp embedded in the NAME, not mtime. mtime has
+        # coarse granularity on some filesystems, so a batch of snapshots
+        # taken in the same second ties and the "newest kept" guarantee
+        # becomes arbitrary — which can drop the very snapshot a restore
+        # would need. The name sorts lexicographically in real time order.
         snaps = sorted(
             snapshots_dir(data_dir).glob(f"{target}__*"),
-            key=lambda p: p.stat().st_mtime,
+            key=lambda p: (p.name.split("__", 2)[1], p.stat().st_mtime),
             reverse=True,
         )
-    except OSError:
+    except (OSError, IndexError):
         return 0
     removed = 0
     for stale in snaps[keep:]:
@@ -149,12 +154,14 @@ def list_snapshots(data_dir: Path, target: Optional[str] = None) -> List[Dict[st
     """All retained snapshots, newest first."""
     out: List[Dict[str, Any]] = []
     try:
+        # Same name-based ordering as _prune, so the listing agrees with
+        # what the cap actually kept.
         files = sorted(
             snapshots_dir(data_dir).glob("*__*"),
-            key=lambda p: p.stat().st_mtime,
+            key=lambda p: (p.name.split("__", 2)[1], p.stat().st_mtime),
             reverse=True,
         )
-    except OSError:
+    except (OSError, IndexError):
         return out
     for p in files:
         name = p.name
