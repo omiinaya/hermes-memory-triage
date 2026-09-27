@@ -66,7 +66,18 @@ def _is_held(key: str) -> bool:
 
 
 def _lock_path(store_path: Path) -> Path:
-    return store_path.with_name(store_path.name + ".memtriage.lock")
+    """The lock file this module shares with the built-in memory tool.
+
+    It MUST be the same inode the built-in tool locks, or the two provide no
+    mutual exclusion at all and a triage can read-modify-write a store the
+    memory tool is writing. ``tools/memory_tool_store.py:173`` computes
+    ``path.with_suffix(path.suffix + ".lock")`` -- i.e. ``MEMORY.md.lock``.
+
+    The previous ``.memtriage.lock`` suffix was a different file, so the
+    comment claiming these exclude each other was false: a concurrent
+    ``memory`` tool write and a triage both proceeded.
+    """
+    return store_path.with_suffix(store_path.suffix + ".lock")
 
 
 @contextmanager

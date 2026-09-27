@@ -5,7 +5,9 @@
   by the auto-trigger hooks to avoid re-triaging on every write),
 * ``awaiting_approval`` — run id of a manual-mode plan waiting for review.
 
-Written atomically (temp + os.replace).
+Written atomically (temp + os.replace) under a lock: concurrent writers
+previously shared one temp name, so of 60 concurrent ``mark_notified`` calls
+only 18 survived and 31 raised FileNotFoundError. See :mod:`atomicio`.
 """
 
 from __future__ import annotations
@@ -15,40 +17,43 @@ import os
 import time
 from typing import Any, Dict, Optional
 
+from . import atomicio
 from .config import Config
 
 
 def _load(cfg: Config) -> Dict[str, Any]:
-    path = cfg.state_path
-    if not path.exists():
-        return {}
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        return raw if isinstance(raw, dict) else {}
-    except (json.JSONDecodeError, OSError):
-        return {}
+    return atomicio._read(cfg.state_path)
 
 
 def _save(cfg: Config, state: Dict[str, Any]) -> None:
-    path = cfg.state_path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    atomicio.write_json_atomic(cfg.state_path, state)
+
+
+def _update(cfg: Config, mutate) -> None:
+    """Read-modify-write state.json under a lock."""
+    atomicio.read_modify_write(cfg.state_path, mutate)
 
 
 def mark_triage(cfg: Config, run_id: str) -> None:
-    state = _load(cfg)
-    state["last_triage_at"] = int(time.time())
-    state["last_run_id"] = run_id
-    state.pop("awaiting_approval", None)
-    _save(cfg, state)
+    def mutate(state: Dict[str, Any]) -> Dict[str, Any]:
+        state["last_triage_at"] = int(time.time())
+        state["last_run_id"] = run_id
+        state.pop("awaiting_approval", None)
+        return state
+    _update(cfg, mutate)
 
 
 def mark_awaiting_approval(cfg: Config, run_id: str) -> None:
-    state = _load(cfg)
-    state["awaiting_approval"] = run_id
-    _save(cfg, state)
+    def mutate(state: Dict[str, Any]) -> Dict[str, Any]:
+        # Never clobber a DIFFERENT pending plan: an auto-run firing while a
+        # plan awaits review used to overwrite it, orphaning plan-<id>.json
+        # on disk with nothing pointing at it (unapprovable, unreported).
+        pending = state.get("awaiting_approval")
+        if pending and pending != run_id:
+            return None
+        state["awaiting_approval"] = run_id
+        return state
+    _update(cfg, mutate)
 
 
 def awaiting_approval(cfg: Config) -> Optional[str]:
@@ -56,9 +61,10 @@ def awaiting_approval(cfg: Config) -> Optional[str]:
 
 
 def clear_awaiting(cfg: Config) -> None:
-    state = _load(cfg)
-    state.pop("awaiting_approval", None)
-    _save(cfg, state)
+    def mutate(state: Dict[str, Any]) -> Dict[str, Any]:
+        state.pop("awaiting_approval", None)
+        return state
+    _update(cfg, mutate)
 
 
 def last_triage_at(cfg: Config) -> Optional[int]:
@@ -92,23 +98,25 @@ def notified_runs(cfg: Config) -> list:
 
 def mark_notified(cfg: Config, run_id: str) -> None:
     """Record that a run's report was injected into a conversation."""
-    state = _load(cfg)
-    runs = list(state.get("notified_runs", []) or [])
-    if run_id not in runs:
-        runs.append(run_id)
-    state["notified_runs"] = runs
-    _save(cfg, state)
+    def mutate(state: Dict[str, Any]) -> Dict[str, Any]:
+        runs = list(state.get("notified_runs", []) or [])
+        if run_id not in runs:
+            runs.append(run_id)
+        state["notified_runs"] = runs
+        return state
+    _update(cfg, mutate)
 
 
 def record_execution(cfg: Config, run_id: str, summary: Any) -> None:
     """Persist the outcome of an applied plan (for post-execution notice)."""
-    st = _load(cfg)
-    st["last_execution"] = {
-        "run_id": run_id,
-        "summary": summary,
-        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }
-    _save(cfg, st)
+    def mutate(state: Dict[str, Any]) -> Dict[str, Any]:
+        state["last_execution"] = {
+            "run_id": run_id,
+            "summary": summary,
+            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        return state
+    _update(cfg, mutate)
 
 
 def last_execution(cfg: Config) -> Optional[Dict[str, Any]]:

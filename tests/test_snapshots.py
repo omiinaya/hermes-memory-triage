@@ -207,7 +207,7 @@ def test_snapshots_and_restore_file_are_in_the_command_surface():
 
     assert "snapshots" in plugin.SUBCOMMANDS
     assert "restore-file" in plugin.SUBCOMMANDS
-    enum = plugin.TOOL_SCHEMA["properties"]["action"]["enum"]
+    enum = plugin.TOOL_SCHEMA["parameters"]["properties"]["action"]["enum"]
     assert "snapshots" in enum
     assert "restore-file" in enum
 

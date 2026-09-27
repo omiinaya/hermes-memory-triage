@@ -118,4 +118,4 @@ def test_setup_registered_in_surface():
     import plugin  # noqa: F401  (repo root is on sys.path above)
 
     assert "setup" in plugin.SUBCOMMANDS
-    assert "setup" in plugin.TOOL_SCHEMA["properties"]["action"]["enum"]
+    assert "setup" in plugin.TOOL_SCHEMA["parameters"]["properties"]["action"]["enum"]

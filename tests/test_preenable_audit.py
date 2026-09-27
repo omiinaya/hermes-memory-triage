@@ -382,3 +382,140 @@ def test_a_failed_memory_call_never_triggers_triage(monkeypatch):
         tool_name="memory", status="error", args={"action": "add"},
     )
     assert not called
+
+
+# --- defect 7: the tool reached the model as an EMPTY tool -----------------
+#
+# register_tool spreads the schema into the function object and
+# sanitize_tool_schemas replaces a missing/non-dict "parameters" with
+# {"type":"object","properties":{},"required":[]}. A bare JSON Schema has no
+# "parameters" key, so the action enum and the description were both stripped
+# and the model had nothing to call.
+
+
+def test_the_tool_schema_survives_the_sanitizer_with_its_arguments():
+    import importlib.util as u
+    spec = u.spec_from_file_location(
+        "mtplug_schema",
+        str(__import__("pathlib").Path(__file__).resolve().parents[1]
+            / "plugin" / "__init__.py"),
+    )
+    plug = u.module_from_spec(spec)
+    spec.loader.exec_module(plug)
+
+    schema = plug.TOOL_SCHEMA
+    assert "parameters" in schema, (
+        "TOOL_SCHEMA must nest its arguments under 'parameters' or the "
+        "sanitizer replaces them with an empty object"
+    )
+    # Reproduce exactly what the registry + sanitizer do to it.
+    as_sent = {"type": "function", "function": {**schema, "name": "mem_triage"}}
+
+    def _sanitize(fn):
+        params = fn.get("parameters")
+        if not isinstance(params, dict):
+            fn = {**fn, "parameters": {"type": "object", "properties": {},
+                                       "required": []}}
+        return fn
+
+    fn = _sanitize(as_sent["function"])
+    props = fn["parameters"].get("properties", {})
+    assert "action" in props, (
+        f"the model would see an empty tool: {fn['parameters']}"
+    )
+    assert "run" in props["action"]["enum"], props["action"]
+    assert fn.get("description"), "the description must reach the model"
+
+
+def test_every_subcommand_is_reachable_through_the_tool():
+    """SUBCOMMANDS and the tool enum must not drift apart."""
+    import importlib.util as u
+    from pathlib import Path
+    spec = u.spec_from_file_location(
+        "mtplug_enum", str(Path(__file__).resolve().parents[1]
+                           / "plugin" / "__init__.py"))
+    plug = u.module_from_spec(spec)
+    spec.loader.exec_module(plug)
+    enum = set(plug.TOOL_SCHEMA["parameters"]["properties"]["action"]["enum"])
+    missing = set(plug.SUBCOMMANDS) - enum
+    assert not missing, (
+        f"subcommands not callable through the tool: {sorted(missing)}"
+    )
+
+
+# --- defect 8: concurrent state.json writers lost 42 of 60 notifications ----
+
+
+def test_concurrent_state_writers_lose_nothing():
+    """Eight modules wrote JSON through ONE fixed ".tmp" name.
+
+    4 threads x 15 mark_notified stored 18 of 60 and raised 31
+    FileNotFoundError, because each writer renamed the shared temp out from
+    under the others. Every lost id is a run whose report Omar never sees.
+    """
+    import threading
+    from memtriage import state as st_mod
+    from memtriage.config import Config
+
+    cfg = Config()
+    errors = []
+
+    def hammer(n):
+        for i in range(15):
+            try:
+                st_mod.mark_notified(cfg, f"RUN-{n}-{i}")
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{type(exc).__name__}: {exc}")
+
+    threads = [threading.Thread(target=hammer, args=(n,)) for n in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, errors[:3]
+    assert len(st_mod.notified_runs(cfg)) == 60, (
+        f"lost {60 - len(st_mod.notified_runs(cfg))} notification records"
+    )
+
+
+# --- defect 9: quarantine restore removed the WRONG line --------------------
+
+
+def test_restoring_a_record_does_not_eat_a_blank_line_or_a_neighbour():
+    """all_evicted SKIPS blank lines, so its indices are not file offsets."""
+    import json as _json
+    import time as _time
+    from memtriage import quarantine
+    from memtriage.config import Config
+
+    cfg = Config()
+    qf = cfg.quarantine_dir / "quarantine.jsonl"
+    qf.parent.mkdir(parents=True, exist_ok=True)
+    now = _time.time()
+    rec = lambda t: _json.dumps(  # noqa: E731
+        {"text": t, "target": "memory", "run_id": "r", "evicted_at": now}
+    )
+    qf.write_text(rec("VICTIM-A") + "\n\n" + rec("VICTIM-B") + "\n")
+
+    st.write_entries(st.TARGET_MEMORY, [])
+    assert quarantine.restore(cfg, text="VICTIM-B") is True
+    left = [r["text"] for r in quarantine.all_evicted(cfg)]
+    assert left == ["VICTIM-A"], (
+        f"restore removed the wrong record: {left}"
+    )
+
+
+# --- defect 10: the lock was a different inode than the memory tool's ------
+
+
+def test_the_store_lock_is_the_same_file_the_built_in_tool_locks():
+    """A different lock file means NO mutual exclusion at all."""
+    from pathlib import Path as _P
+    from memtriage import locking
+
+    store = _P("/tmp/x/MEMORY.md")
+    builtin = store.with_suffix(store.suffix + ".lock")  # memory_tool_store.py:173
+    assert locking._lock_path(store) == builtin, (
+        f"memtriage locks {locking._lock_path(store)} but the built-in memory "
+        f"tool locks {builtin}: they do not exclude each other"
+    )

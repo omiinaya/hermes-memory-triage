@@ -48,21 +48,43 @@ SUBCOMMANDS = (
     "quarantine ledger config setup".split()
 )
 
-TOOL_SCHEMA = {
+TOOL_DESCRIPTION = (
+    "Run memory triage or inspect its state. Actions: status, run, review, "
+    "approve, restore, restore-file, snapshots, purge, quarantine, ledger, "
+    "config, setup."
+)
+
+# The argument schema. Hermes' registry does ``{**schema, "name": ...}`` and
+# then ``sanitize_tool_schemas`` REPLACES any ``function.parameters`` that is
+# not a dict with ``{"type":"object","properties":{},"required":[]}``. A bare
+# JSON Schema (properties at the top level, no "parameters" key) therefore
+# reaches the model as an EMPTY tool with no description -- the action enum
+# invisible and the tool effectively uncallable. Verified 2026-09-27.
+# It must be nested under "parameters".
+_ARGUMENTS = {
     "type": "object",
     "properties": {
         "action": {
             "type": "string",
+            "description": "What to do.",
             "enum": [
-                "status", "run", "review", "approve", "restore", "purge",
+                "status", "run", "review", "approve", "restore",
+                "restore-file", "snapshots", "purge",
                 "quarantine", "ledger", "config", "setup",
-                "restore-file", "snapshots",
             ],
         },
         "force": {"type": "boolean", "description": "Run even if below threshold."},
         "text": {"type": "string", "description": "Evicted entry text for restore."},
     },
     "required": ["action"],
+}
+
+# The shape register_tool wants: a description plus the arguments nested under
+# "parameters". The registry spreads this into the function object, so
+# "description" arrives at the model and "parameters" survives sanitization.
+TOOL_SCHEMA = {
+    "description": TOOL_DESCRIPTION,
+    "parameters": _ARGUMENTS,
 }
 
 

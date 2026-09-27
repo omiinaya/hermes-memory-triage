@@ -99,14 +99,24 @@ def purge_expired(cfg) -> int:
 
 
 def _remove_the_line(cfg, indices: list[int]) -> None:
+    """Remove records by the index :func:`all_evicted` assigned them.
+
+    DANGER (fixed 2026-09-27): ``all_evicted`` SKIPS blank and unparseable
+    lines, so its indices do NOT correspond to raw file lines. Passing its
+    indices into a raw ``splitlines()`` walk deleted the wrong line -- with
+    one blank line present, restoring a record removed the blank line and
+    left the record listed as evicted. Rewrite by filtering on the record
+    objects instead, which is immune to any offset.
+    """
     path = _file(cfg)
     if not path.exists():
         return
-    lines = path.read_text(encoding="utf-8").splitlines()
-    new_lines = [l for i, l in enumerate(lines) if i not in set(indices)]
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text("\n".join(new_lines) + ("\n" if new_lines else ""), encoding="utf-8")
-    os.replace(tmp, path)
+    doomed = {i for i in indices}
+    records = all_evicted(cfg)
+    survivors = [r for i, r in enumerate(records) if i not in doomed]
+    if len(survivors) == len(records):
+        return
+    _rewrite_file_objs(cfg, survivors)
 
 
 def _rewrite_file_objs(cfg, records: list[Dict[str, Any]]) -> None:
