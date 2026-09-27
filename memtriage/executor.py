@@ -39,6 +39,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import ledger, locking, quarantine, snapshots, store as memory_store
 from .config import Config, _default_data_dir
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 # Marker file recording which run ids have already landed. A plan's indices
 # are positional, so a replay resolves them against a shifted store and would
 # delete unrelated entries — refuse the replay instead.
@@ -328,6 +332,71 @@ def _usage_snapshot() -> Dict[str, Dict[str, Any]]:
     return snap
 
 
+DECISION_LOG_NAME = "decisions.jsonl"
+
+
+def _log_decision(
+    run_id: str,
+    level: str,
+    msg: str,
+    action: Optional[Dict[str, Any]] = None,
+    cfg: Optional[Config] = None,
+) -> None:
+    """Append one decision to the durable, human-readable decision log.
+
+    Why a file and not the logger: the plugin's own logs are only visible if
+    someone is tailing the Hermes service, and an `auto` run fires from a
+    session hook with nobody watching. A run that relocated nine entries
+    between stores and skills must leave a record a human can open a week
+    later and audit, one line per decision, with the model's own stated
+    reason attached.
+
+    JSONL, append-only, never rewritten, and opened in append mode under the
+    same lock discipline as the other stores. A logging failure must never
+    abort a triage, so every error here is swallowed after one warning.
+    """
+    try:
+        base = Path(_active_data_dir(cfg))
+        base.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(
+            {
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "run_id": run_id,
+                "level": level,
+                "msg": msg,
+                **({"action": action} if action else {}),
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+        with locking.store_lock(base / DECISION_LOG_NAME):
+            with open(base / DECISION_LOG_NAME, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+    except Exception as exc:  # noqa: BLE001
+        # Never let the log break a run that is already writing stores.
+        logger.warning("decision log write failed: %s", exc, exc_info=True)
+
+
+def _active_data_dir(cfg: Optional[Config] = None) -> str:
+    """Where the log lives.
+
+    MUST follow the run's own ``cfg.data_dir`` and not a re-derived default:
+    a test (or a sandboxed run) that sets ``cfg.data_dir`` to a temp dir but
+    logged to ``~/.memtriage`` would write outside the sandbox -- the same
+    leak that once put a fixture into the live USER.md. Deriving the path
+    from env is exactly what made that happen.
+    """
+    if cfg is not None:
+        try:
+            return str(cfg.data_dir)
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        return str(_default_data_dir())
+    except Exception:  # noqa: BLE001
+        return os.environ.get("MEMTRIAGE_HOME", "/root/.memtriage")
+
+
 class Executor:
     """Applies a plan; collects results into a report-friendly summary."""
 
@@ -348,9 +417,52 @@ class Executor:
         # Pre-write snapshot paths taken this run, surfaced in the summary so
         # a user can undo the whole run from the report.
         self._snapshot_records: List[Dict[str, Any]] = []
+        # One entry per decision, with the model's own stated reason, so an
+        # unattended `auto` run is auditable after the fact.
+        self.decisions: List[Dict[str, Any]] = []
 
     def _note(self, msg: str) -> None:
         self.applied.append(msg)
+        _log_decision(self._run_id, "applied", msg, cfg=self.cfg)
+
+    def _note_decision(
+        self, level: str, action: Optional[Dict[str, Any]], msg: str
+    ) -> None:
+        """Record a decision AND the plan entry that caused it.
+
+        The summary lists reached the ledger and state.json, but in `auto`
+        mode nothing reads either, so a run that relocated half the store
+        left no trace a human could question. Every decision is also written
+        to a durable append-only JSONL log, one line per decision, carrying
+        the action's index/target/skill and the model's own stated reason --
+        the "why", which the summary never preserved.
+        """
+        if level == "applied":
+            self.applied.append(msg)
+        elif level == "blocked":
+            self.blocked.append(msg)
+        elif level == "pending":
+            self.pending.append(msg)
+        elif level == "error":
+            self.errors.append(msg)
+        # "keep" is a decision to NOT act. It belongs in the log and in
+        # `decisions`, never in applied/pending/errors -- a keep wrote
+        # nothing, so listing it as applied would be a false claim.
+        entry: Dict[str, Any] = {
+            "ts": time.time(),
+            "run_id": self._run_id,
+            "level": level,
+            "msg": msg,
+        }
+        if isinstance(action, dict):
+            entry["action"] = {
+                k: action.get(k)
+                for k in ("action", "target", "index", "entries", "skill_name",
+                          "script_name", "reason", "_source")
+                if k in action
+            }
+        self.decisions.append(entry)
+        _log_decision(self._run_id, level, msg, entry.get("action"), self.cfg)
 
     def _note_removal(self, target: str, msg: str) -> None:
         """Narrate a REMOVAL, which a later guard can still revoke.
@@ -366,6 +478,7 @@ class Executor:
 
     def _note_pending(self, msg: str) -> None:
         self.pending.append(msg)
+        _log_decision(self._run_id, "pending", msg, cfg=self.cfg)
 
     def _ledger(self, kind: str, destination: str, summary: str) -> None:
         ledger.record(
@@ -383,6 +496,7 @@ class Executor:
         self.applied = []
         self.pending = []
         self.errors = []
+        self.decisions: List[Dict[str, Any]] = []
         self._provisional = {}
         self._snapshot_records = []
         # Which source entries each pending append REPLACES, per target.
@@ -778,6 +892,10 @@ class Executor:
             "after": after,
             "lock_acquired": lock_acquired,
             "snapshots": list(self._snapshot_records),
+            # Every decision this run made, with the model's own reason, so
+            # an `auto` run is auditable without reading the JSONL log.
+            "decisions": list(self.decisions),
+            "decision_log": str(Path(_active_data_dir(self.cfg)) / DECISION_LOG_NAME),
         }
 
     # -- per-action dispatch ---------------------------------------------
@@ -796,6 +914,14 @@ class Executor:
                 f"(expected {memory_store.TARGET_MEMORY!r} or {memory_store.TARGET_USER!r})"
             )
         if kind == "keep":
+            # Record the DECISION not to act. A `keep` is a judgement (this
+            # entry is identity-critical, or not yet worth moving) and in an
+            # auto run the absence of a line for it is indistinguishable from
+            # the model never considering it.
+            self._note_decision(
+                "keep", a,
+                f"kept {target}#{a.get('index')} in place",
+            )
             return
         if kind == "consolidate":
             self._do_consolidate(a, original, removals, appends, expected)
@@ -990,7 +1116,7 @@ class Executor:
             self._note(f"pre-write snapshot FAILED for {path}: {exc}")
         addition = f"\n\n## Routed by memtriage ({self._provenance})\n\n{marker}\n"
         _write_atomic(path, existing.rstrip("\n") + addition)
-        self._note(f"appended to existing skill '{path.parent.name}' ({path})")
+        self._note_decision("applied", a, f"appended to existing skill '{path.parent.name}' ({path})")
         if snap:
             self._note(f"  pre-write snapshot: {snap}")
         self._ledger("skill-append", str(path), body[:200])
@@ -1027,7 +1153,7 @@ class Executor:
             provenance=_yaml_scalar(self._provenance),
         ) + body + "\n"
         _write_atomic(target, content)
-        self._note(f"routed to skill '{name}' ({target})")
+        self._note_decision("applied", a, f"routed to skill '{name}' ({target})")
         self._ledger("skill", str(target), body[:200])
 
     def _do_profile(self, a, appends) -> None:
@@ -1046,7 +1172,7 @@ class Executor:
             raise ValueError("route-to-profile refused: user store at/over limit")
         # Replaces nothing — this is new text, so it must never be withdrawn.
         self._add_append("user", appends, text, sources=None)
-        self._note(f"routed to profile ({len(text)} chars)")
+        self._note_decision("applied", a, f"routed to profile ({len(text)} chars)")
         self._ledger("user", "USER.md", text[:200])
 
     def _do_provider(self, a, original=None) -> bool:
@@ -1064,7 +1190,7 @@ class Executor:
         if notice.startswith("pending"):
             self._note_pending(f"route-to-provider: {notice}")
             return False
-        self._note(f"routed to provider (gateway {notice})")
+        self._note_decision("applied", a, f"routed to provider (gateway {notice})")
         # Record the FULL routed text, not a 200-char summary: the source
         # entry is being removed, so the ledger is the only remaining record
         # of what was written. A truncated summary here is silent loss.
@@ -1083,11 +1209,11 @@ class Executor:
         _write_atomic(script_path, body)
         if ext in ("sh", "bash"):
             _make_executable(script_path)
-        self._note(f"routed to script '{script_name}' ({script_path})")
+        self._note_decision("applied", a, f"routed to script '{script_name}' ({script_path})")
         if a.get("cron_schedule"):
             result = _register_cron(str(script_path), a["cron_schedule"])
             if result == "ok":
-                self._note(f"registered cron for '{script_name}'")
+                self._note_decision("applied", a, f"registered cron for '{script_name}'")
             else:
                 self._note_pending(f"cron for '{script_name}': {result}")
         self._ledger("script", str(script_path), body[:200])

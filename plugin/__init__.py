@@ -45,13 +45,13 @@ _ctx: Any = None
 
 SUBCOMMANDS = (
     "status run review approve restore restore-file snapshots purge "
-    "quarantine ledger config setup".split()
+    "quarantine decisions ledger config setup".split()
 )
 
 TOOL_DESCRIPTION = (
     "Run memory triage or inspect its state. Actions: status, run, review, "
-    "approve, restore, restore-file, snapshots, purge, quarantine, ledger, "
-    "config, setup."
+    "approve, restore, restore-file, snapshots, purge, quarantine, decisions, "
+    "ledger, config, setup."
 )
 
 # The argument schema. Hermes' registry does ``{**schema, "name": ...}`` and
@@ -70,7 +70,7 @@ _ARGUMENTS = {
             "enum": [
                 "status", "run", "review", "approve", "restore",
                 "restore-file", "snapshots", "purge",
-                "quarantine", "ledger", "config", "setup",
+                "quarantine", "decisions", "ledger", "config", "setup",
             ],
         },
         "force": {"type": "boolean", "description": "Run even if below threshold."},
@@ -267,18 +267,45 @@ def _notify_result(result: Dict[str, Any]) -> None:
 
 
 def _render_execution(execution: Dict[str, Any]) -> str:
-    """Render a compact 'what it did' block from an executor summary."""
+    """Render a compact 'what it did, and why' block from an executor summary."""
     applied = execution.get("applied", [])
     pending = execution.get("pending", [])
     errors = execution.get("errors", [])
+    blocked = execution.get("blocked", [])
+    decisions = execution.get("decisions", [])
     lines = [_plural("applied", len(applied))]
     lines += [f"  + {a}" for a in applied]
     if pending:
         lines.append(_plural("pending", len(pending), "best-effort: gateway/cron unreachable"))
         lines += [f"  ~ {p}" for p in pending]
+    # Blocked is the one that matters most: a refusal left the store exactly
+    # as over budget as it was, and it used to be invisible here.
+    if blocked:
+        lines.append(
+            f"{len(blocked)} refused by a safety guard — nothing was removed, "
+            f"the store is still as full as before:"
+        )
+        lines += [f"  x {b}" for b in blocked]
     if errors:
         lines.append(f"errors ({len(errors)}):")
         lines += [f"  ! {e}" for e in errors]
+    # The "why": each decision's stated reason, capped so the injection stays
+    # readable in a chat window.
+    reasons = [
+        (d.get("action") or {}).get("reason")
+        for d in decisions
+        if (d.get("action") or {}).get("reason")
+    ]
+    if reasons:
+        shown = reasons[:12]
+        lines.append(f"why ({len(reasons)} stated reason(s)):")
+        for r in shown:
+            lines.append(f"  - {r}")
+        if len(reasons) > len(shown):
+            lines.append(f"  ... +{len(reasons) - len(shown)} more")
+    log = execution.get("decision_log")
+    if log:
+        lines.append(f"full log: {log} (mem_triage action=decisions)")
     return "\n".join(lines)
 
 
@@ -372,6 +399,8 @@ def _dispatch(sub: str, rest: List[str], *, from_tool: bool) -> str:
             return commands.cmd_purge(cfg)
         if sub == "quarantine":
             return commands.cmd_quarantine(cfg)
+        if sub == "decisions":
+            return commands.cmd_decisions(cfg, rest[0] if rest else "")
         if sub == "ledger":
             return commands.cmd_ledger(cfg)
         if sub == "config":

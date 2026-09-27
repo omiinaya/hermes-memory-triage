@@ -180,6 +180,58 @@ def cmd_purge(cfg: Config) -> str:
     return f"Purged {n} expired quarantine entr{('y' if n == 1 else 'ies')}."
 
 
+def cmd_decisions(cfg: Config, run_id: str = "", limit: int = 40) -> str:
+    """Show what triage decided and why, newest last, from the durable log.
+
+    The summary lists in state.json only say WHAT happened. The reason a
+    given entry was routed to a given skill -- the model's own stated
+    justification -- was never preserved anywhere. That is the difference
+    between trusting an unattended run and having to disable it.
+    """
+    import json as _json
+    from .executor import DECISION_LOG_NAME, _active_data_dir
+
+    log = Path(_active_data_dir(cfg)) / DECISION_LOG_NAME
+    if not log.exists():
+        return (
+            f"No decision log yet at {log}. One is written automatically on "
+            f"every run that changes or inspects a store."
+        )
+    rows: List[Dict[str, Any]] = []
+    for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = _json.loads(line)
+        except ValueError:
+            continue
+        if run_id and rec.get("run_id") != run_id:
+            continue
+        rows.append(rec)
+    if not rows:
+        return (f"No decision-log entries{f' for run {run_id}' if run_id else ''} "
+                f"in {log}.")
+    shown = rows[-limit:]
+    lines = [f"{len(rows)} decision(s) in {log}"
+             + (f" (showing last {len(shown)})" if len(shown) < len(rows) else ""),
+             ""]
+    for r in shown:
+        act = r.get("action") or {}
+        who = " ".join(
+            str(act.get(k)) for k in ("action", "target", "index", "skill_name")
+            if act.get(k) is not None
+        ) or "-"
+        lines.append(f"[{r.get('level','?').upper()}] {r.get('ts','')} "
+                     f"{r.get('run_id','')}")
+        lines.append(f"    {r.get('msg','')}")
+        lines.append(f"    action: {who}")
+        if act.get("reason"):
+            lines.append(f"    reason: {act['reason']}")
+        lines.append("")
+    return "\n".join(lines)
+
+
 def cmd_ledger(cfg: Config) -> str:
     led = ledger_mod.load(cfg)
     if not led:

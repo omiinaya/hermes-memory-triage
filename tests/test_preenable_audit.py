@@ -1029,3 +1029,151 @@ def test_two_different_equal_length_plans_still_refuse():
     b = [{"action": "keep", "index": 0, "text": "two", "reason": "r"}]
     with pytest.raises(PlanValidationError, match="Ambiguous"):
         parse_plan(json.dumps(a) + "\n" + json.dumps(b))
+
+
+# --- auto mode must be auditable: WHAT it did and WHY ------------------------
+#
+# `auto` applies a plan unattended from a session hook. The summary lists
+# reached state.json and the ledger, but nothing reads either, and the
+# model's own stated reason -- the only "why" that ever existed -- was not
+# preserved anywhere. An unattended run that relocated nine entries was
+# indistinguishable from one that did nothing.
+
+def test_every_decision_is_written_to_the_durable_log_with_its_reason(tmp_path):
+    import json as _json
+    from memtriage import config as cfg_mod, executor as ex_mod
+
+    cfg = cfg_mod.Config()
+    cfg.data_dir = tmp_path / "mem"
+    cfg.data_dir.mkdir(parents=True, exist_ok=True)
+
+    plan = [
+        {"action": "keep", "target": "user", "index": 0,
+         "reason": "Identity core is never evicted."},
+    ]
+    ex = ex_mod.Executor(cfg)
+    ex._run_id = "LOG-TEST"
+    ex._apply(plan[0], None, {}, {}, None)
+
+    log = cfg.data_dir / ex_mod.DECISION_LOG_NAME
+    assert log.exists(), "the decision log was not written"
+    recs = [_json.loads(l) for l in log.read_text().splitlines() if l.strip()]
+    assert len(recs) == 1, f"expected exactly one line, got {len(recs)}"
+    assert recs[0]["level"] == "keep"
+    assert recs[0]["run_id"] == "LOG-TEST"
+    # The whole point: the reason survives.
+    assert recs[0]["action"]["reason"] == "Identity core is never evicted."
+
+
+def test_a_keep_is_never_reported_as_applied(tmp_path):
+    """A keep writes nothing, so listing it under `applied` is a false claim."""
+    from memtriage import config as cfg_mod, executor as ex_mod
+
+    cfg = cfg_mod.Config()
+    cfg.data_dir = tmp_path / "mem"
+    cfg.data_dir.mkdir(parents=True, exist_ok=True)
+
+    ex = ex_mod.Executor(cfg)
+    ex._run_id = "KEEP-TEST"
+    ex._apply({"action": "keep", "target": "user", "index": 0},
+              None, {}, {}, None)
+
+    assert ex.applied == []
+    assert ex.pending == []
+    assert ex.errors == []
+    # ...but it IS a recorded decision.
+    assert len(ex.decisions) == 1
+    assert ex.decisions[0]["level"] == "keep"
+
+
+def test_one_decision_writes_exactly_one_log_line(tmp_path):
+    """Regression: a leftover second _log_decision call emitted a phantom
+    [PENDING] line for every real decision, doubling the log and inventing
+    best-effort failures that never happened."""
+    from memtriage import config as cfg_mod, executor as ex_mod
+
+    cfg = cfg_mod.Config()
+    cfg.data_dir = tmp_path / "mem"
+    cfg.data_dir.mkdir(parents=True, exist_ok=True)
+
+    ex = ex_mod.Executor(cfg)
+    ex._run_id = "ONCE-TEST"
+    for target in ("user", "memory"):
+        ex._apply({"action": "keep", "target": target, "index": 0},
+                  None, {}, {}, None)
+
+    log = cfg.data_dir / ex_mod.DECISION_LOG_NAME
+    recs = [l for l in log.read_text().splitlines() if l.strip()]
+    assert len(recs) == 2, f"2 decisions must write 2 lines, wrote {len(recs)}"
+    assert all('"pending"' not in l for l in recs), (
+        "a keep must never be logged as a pending best-effort failure"
+    )
+
+
+def test_the_decision_log_survives_an_unwritable_data_dir(tmp_path):
+    """A logging failure must never abort a run that is already writing."""
+    from memtriage import config as cfg_mod, executor as ex_mod
+
+    cfg = cfg_mod.Config()
+    cfg.data_dir = tmp_path / "mem"
+    ex = ex_mod.Executor(cfg)
+    ex._run_id = "RESILIENT"
+
+    # A directory where the log file should be: open() for append will fail.
+    (cfg.data_dir / ex_mod.DECISION_LOG_NAME).mkdir(parents=True)
+
+    # Must not raise.
+    ex._note_decision("applied", {"action": "keep"}, "should not explode")
+    assert ex.applied == ["should not explode"]
+
+
+def test_render_execution_shows_blocked_and_the_why():
+    """A guard refusal leaves the store exactly as full as before. It used
+    to be invisible in the in-session notification."""
+    import importlib
+    plugin = importlib.import_module("plugin")
+
+    out = plugin._render_execution({
+        "applied": ["routed to skill 'x'"],
+        "pending": [],
+        "errors": [],
+        "blocked": ["target 'memory' would be emptied entirely — refused"],
+        "decisions": [
+            {"action": {"reason": "Reusable procedure, skill already exists."}},
+            {"action": {"reason": "Identity critical, kept."}},
+        ],
+        "decision_log": "/root/.memtriage/decisions.jsonl",
+    })
+    assert "refused" in out
+    assert "would be emptied" in out
+    assert "Reusable procedure" in out
+    assert "Identity critical" in out
+    assert "decisions.jsonl" in out
+
+
+def test_the_decisions_command_reads_the_log(tmp_path):
+    from memtriage import config as cfg_mod, commands as cmd, executor as ex_mod
+
+    cfg = cfg_mod.Config()
+    cfg.data_dir = tmp_path / "mem"
+    cfg.data_dir.mkdir(parents=True, exist_ok=True)
+
+    ex = ex_mod.Executor(cfg)
+    ex._run_id = "READ-TEST"
+    ex._apply({"action": "keep", "target": "user", "index": 0,
+               "reason": "Because reasons matter."},
+              None, {}, {}, None)
+
+    text = cmd.cmd_decisions(cfg)
+    assert "Because reasons matter." in text
+    assert "READ-TEST" in text
+    # Filter by run id works too.
+    assert "Because reasons matter." in cmd.cmd_decisions(cfg, "READ-TEST")
+    assert "no decision-log entries" in cmd.cmd_decisions(cfg, "NOPE").lower()
+
+
+def test_the_decisions_action_is_reachable_from_the_tool():
+    import importlib
+    plugin = importlib.import_module("plugin")
+    assert "decisions" in plugin.SUBCOMMANDS
+    assert "decisions" in plugin.TOOL_SCHEMA["parameters"]["properties"]["action"]["enum"]
