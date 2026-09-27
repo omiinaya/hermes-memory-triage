@@ -175,6 +175,139 @@ def _prune(
     return removed
 
 
+SKILLS_SNAPSHOT_SUBDIR = "skills"
+
+
+def list_skill_snapshots(data_dir: Path) -> List[Dict[str, Any]]:
+    """Skill snapshots, newest first.
+
+    These live in a SUBDIRECTORY, so the top-level glob in
+    :func:`list_snapshots` has never seen them. That is why 14 of them sat on
+    disk with no command able to restore any: skill writes are the most
+    frequent mutation this plugin makes, and the only one with no undo.
+
+    The snapshot name is ``<skill-name>__<run-id>__SKILL.md`` and it does NOT
+    record the skill's category, so the live file is located by NAME at
+    restore time (see :func:`skill_path_by_name`).
+    """
+    out: List[Dict[str, Any]] = []
+    try:
+        d = snapshots_dir(data_dir) / SKILLS_SNAPSHOT_SUBDIR
+        files = sorted(
+            d.glob("*__*"),
+            key=lambda p: (p.name.split("__", 2)[1] if "__" in p.name else "",
+                           p.stat().st_mtime),
+            reverse=True,
+        )
+    except OSError:
+        return out
+    for p in files:
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        parts = p.name.split("__", 2)
+        out.append({
+            "target": SKILLS_SNAPSHOT_SUBDIR,
+            "skill": parts[0],
+            "run_id": parts[1] if len(parts) > 1 else "",
+            "path": str(p),
+            "name": p.name,
+            "bytes": st.st_size,
+            "mtime_iso": time.strftime(
+                "%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime)
+            ),
+        })
+    return out
+
+
+def skill_path_by_name(skills_root: Path, name: str) -> Optional[Path]:
+    """Locate a live SKILL.md by directory name, in any category.
+
+    A snapshot records the skill NAME but not its category, so a restore has
+    to search. Category is deliberately not part of the key: the whole point
+    of the collision fix is that a name can live anywhere in the tree.
+    """
+    if not name or Path(name).name != name or name in (".", ".."):
+        return None
+    try:
+        for p in Path(skills_root).rglob("SKILL.md"):
+            if p.parent.name == name:
+                return p
+    except OSError:
+        return None
+    return None
+
+
+def restore_skill(
+    data_dir: Path,
+    name: str,
+    skills_root: Path,
+    keep: int = DEFAULT_RETAIN_SNAPSHOTS,
+) -> Dict[str, Any]:
+    """Restore a skill file from a pre-write snapshot.
+
+    ``skills_root`` is REQUIRED and passed in, not resolved from the
+    environment inside this function. An earlier draft called a
+    ``store.skills_root()`` helper, which does not exist, and the shape I
+    was reaching for instead -- resolve the tree from ambient env -- is
+    exactly the leak vector that once put a test fixture into the live
+    USER.md. The caller owns the path so a sandbox cannot reach the real
+    tree by accident.
+
+    Snapshots the CURRENT file first, so restoring a wrong snapshot is
+    itself reversible -- the same contract :func:`restore` gives for the
+    stores.
+    """
+    import shutil as _shutil
+
+    root = snapshots_dir(data_dir) / SKILLS_SNAPSHOT_SUBDIR
+    if not name or Path(name).name != name or name in (".", ".."):
+        return {"restored": False, "reason": f"invalid snapshot name {name!r}"}
+    src = root / name
+    try:
+        if root.resolve() not in src.resolve().parents:
+            return {"restored": False,
+                    "reason": f"snapshot {name!r} is outside {root}"}
+    except OSError as exc:
+        return {"restored": False, "reason": str(exc)}
+    if not src.exists():
+        return {"restored": False, "reason": f"no such snapshot {name!r}"}
+    skill = name.split("__", 1)[0]
+    dest = skill_path_by_name(skills_root, skill)
+    if dest is None:
+        return {
+            "restored": False,
+            "reason": (
+                f"no live skill named {skill!r} under {skills_root}. The "
+                f"snapshot is intact at {src}; copy it back manually if the "
+                f"skill was deleted rather than modified."
+            ),
+        }
+    undo: Optional[Path] = None
+    try:
+        # Snapshot the current state first, so this restore is undoable.
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists():
+            run_id = name.split("__")[1] if name.count("__") > 1 else "manual"
+            undo = root / f"{skill}__undo-{run_id}__{dest.name}"
+            tmp = undo.with_name(undo.name + f".tmp{os.getpid()}")
+            _shutil.copy2(dest, tmp)
+            os.replace(tmp, undo)
+        tmp2 = dest.with_name(dest.name + f".tmp{os.getpid()}")
+        _shutil.copy2(src, tmp2)
+        os.replace(tmp2, dest)
+    except OSError as exc:
+        return {"restored": False, "reason": str(exc)}
+    out: Dict[str, Any] = {
+        "restored": True, "from": str(src), "to": str(dest),
+        "bytes": dest.stat().st_size,
+    }
+    if undo:
+        out["undo"] = str(undo)
+    return out
+
+
 def list_snapshots(data_dir: Path, target: Optional[str] = None) -> List[Dict[str, Any]]:
     """All retained snapshots, newest first."""
     out: List[Dict[str, Any]] = []

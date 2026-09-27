@@ -123,34 +123,106 @@ def cmd_approve(cfg: Config) -> str:
 
 def cmd_snapshots(cfg: Config, target: str = "") -> str:
     """List the pre-write snapshots available to restore from."""
+    if target == "skill":
+        return _render_skill_snapshots(cfg)
     snaps = snapshots_mod.list_snapshots(
         cfg.data_dir, target or None
     )
-    if not snaps:
+    skill_snaps = snapshots_mod.list_skill_snapshots(cfg.data_dir)
+    if not snaps and not skill_snaps:
         return (
             "No snapshots yet. One is taken automatically before every "
-            "write that changes a store, so this will populate after the "
-            "first mutating triage."
+            "write that changes a store or a skill, so this will populate "
+            "after the first mutating triage."
         )
-    lines = [f"{len(snaps)} snapshot(s) in {snapshots_mod.snapshots_dir(cfg.data_dir)}:"]
-    for s in snaps[:30]:
+    lines: list = []
+    if snaps:
         lines.append(
-            f"- {s['name']}  {s['bytes']} bytes  {s['mtime_iso']}"
+            f"{len(snaps)} store snapshot(s) in "
+            f"{snapshots_mod.snapshots_dir(cfg.data_dir)}:"
         )
-    if len(snaps) > 30:
-        lines.append(f"  ... and {len(snaps) - 30} more")
-    lines.append(
-        "Restore with: memtriage restore-file <target> <snapshot-name>"
-    )
+        for s in snaps[:30]:
+            lines.append(
+                f"- {s['name']}  {s['bytes']} bytes  {s['mtime_iso']}"
+            )
+        if len(snaps) > 30:
+            lines.append(f"  ... and {len(snaps) - 30} more")
+        lines.append(
+            "Restore with: memtriage restore-file <memory|user> <snapshot-name>"
+        )
+    if skill_snaps:
+        # Shown even when the caller asked for a store target: these used to
+        # be invisible from every angle, which is how 14 of them sat here
+        # with no way back.
+        if lines:
+            lines.append("")
+        lines.append(
+            f"{len(skill_snaps)} skill snapshot(s) in "
+            f"{snapshots_mod.snapshots_dir(cfg.data_dir) / 'skills'}:"
+        )
+        for s in skill_snaps[:30]:
+            lines.append(
+                f"- {s['name']}  {s['bytes']} bytes  {s['mtime_iso']}  "
+                f"(skill: {s['skill']})"
+            )
+        if len(skill_snaps) > 30:
+            lines.append(f"  ... and {len(skill_snaps) - 30} more")
+        lines.append(
+            "Restore with: memtriage restore-file skill <snapshot-name>"
+        )
+    return "\n".join(lines)
+
+
+def _render_skill_snapshots(cfg: Config) -> str:
+    snaps = snapshots_mod.list_skill_snapshots(cfg.data_dir)
+    if not snaps:
+        return "No skill snapshots yet."
+    lines = [
+        f"{len(snaps)} skill snapshot(s) in "
+        f"{snapshots_mod.snapshots_dir(cfg.data_dir) / 'skills'}:"
+    ]
+    for s in snaps[:40]:
+        lines.append(
+            f"- {s['name']}  {s['bytes']} bytes  {s['mtime_iso']}  "
+            f"(skill: {s['skill']})"
+        )
+    if len(snaps) > 40:
+        lines.append(f"  ... and {len(snaps) - 40} more")
+    lines.append("Restore with: memtriage restore-file skill <snapshot-name>")
     return "\n".join(lines)
 
 
 def cmd_restore_file(cfg: Config, target: str, name: str) -> str:
-    """Restore a pre-write snapshot over the live store file."""
+    """Restore a pre-write snapshot over the live store file, or a skill.
+
+    ``target='skill'`` is new (2026-09-27). Skill appends are this plugin's
+    most frequent write and, until now, the only one with no undo: the
+    snapshots existed in a SUBDIRECTORY that neither the lister nor the
+    restorer ever looked at, so 14 of them sat on disk unreachable. A skill
+    line written by mistake is worse than a memory line, because it is
+    followed every matching session.
+    """
     if not target or not name:
-        return "Usage: memtriage restore-file <memory|user> <snapshot-name>"
+        return ("Usage: memtriage restore-file <memory|user|skill> "
+                "<snapshot-name>")
+    if target == "skill":
+        out = snapshots_mod.restore_skill(
+            cfg.data_dir, name, cfg.skills_root, keep=cfg.retain_snapshots
+        )
+        if not out.get("restored"):
+            return f"Restore failed: {out.get('reason')}"
+        return (
+            f"Restored skill {Path(out['to']).parent.name} from "
+            f"{Path(out['from']).name} ({out['bytes']} bytes).\n"
+            f"{out['to']}\n"
+            + (f"The state it replaced was itself snapshotted — undo with:\n"
+               f"memtriage restore-file skill "
+               f"{Path(out['undo']).name}"
+               if out.get("undo") else
+               "The skill had no prior file, so there is nothing to undo.")
+        )
     if target not in ("memory", "user"):
-        return f"Unknown target {target!r} (expected 'memory' or 'user')."
+        return f"Unknown target {target!r} (expected 'memory', 'user' or 'skill')."
     out = snapshots_mod.restore(
         cfg.data_dir, target, name, keep=cfg.retain_snapshots
     )

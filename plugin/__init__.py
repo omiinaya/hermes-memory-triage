@@ -119,15 +119,26 @@ def _auto_run_allowed() -> bool:
         )
 
     if not _truthy("MEMTRIAGE_AUTO_RUN"):
-        logger.debug(
-            "memtriage: over threshold but MEMTRIAGE_AUTO_RUN is not set; "
-            "not running an unattended triage. Run `memtriage run` manually."
+        # INFO, not debug. Verified 2026-09-27: a drop-in carrying these vars
+        # was added to hermes-gateway.service and `systemctl show -p
+        # Environment` reported them present -- because it echoes the UNIT
+        # FILE. /proc/<pid>/environ had neither, so auto-triage silently did
+        # nothing for hours while every "is it enabled" check said yes. At
+        # debug level a wrong brake is indistinguishable from "nothing was
+        # over threshold", which is exactly how that went unnoticed.
+        logger.info(
+            "memtriage: over threshold but MEMTRIAGE_AUTO_RUN is not set in "
+            "the RUNNING process; not running an unattended triage. Run "
+            "`mem_triage action=run` manually. (If you believe the var IS "
+            "set, check /proc/<pid>/environ -- `systemctl show -p Environment` "
+            "reads the unit file, not the process.)"
         )
         return False
     if not _truthy("MEMTRIAGE_ALLOW_WRITES"):
-        logger.debug(
-            "memtriage: MEMTRIAGE_AUTO_RUN set but MEMTRIAGE_ALLOW_WRITES is "
-            "not; not writing to the stores unattended."
+        logger.info(
+            "memtriage: MEMTRIAGE_AUTO_RUN is set but MEMTRIAGE_ALLOW_WRITES "
+            "is not in the RUNNING process; not writing to the stores "
+            "unattended."
         )
         return False
     return True
