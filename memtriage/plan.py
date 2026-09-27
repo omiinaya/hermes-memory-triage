@@ -17,6 +17,8 @@ delete                  hard-delete an entry (only after quarantine grace)
 
 from __future__ import annotations
 
+import re
+
 import json
 from typing import Any, Dict, List, Optional
 
@@ -259,8 +261,59 @@ def validate(actions: List[Any]) -> List[Dict[str, Any]]:
                         f"per entry."
                     )
                 seen_touched.add(key)
+        _reject_placeholder_content(a, n, kind)
         out.append(dict(a))
     return out
+
+
+# Cerveau is shown a worked EXAMPLE containing angle-bracket placeholders
+# ("<the deploy/repo clauses>"). It sometimes copies them back verbatim as
+# real routed content, and the executor then WRITES that literal to a SKILL.md,
+# to a script, or into the provider store. 2026-09-27: a live run created
+# /root/.hermes/skills/tools/team-doctrine/SKILL.md whose entire body was
+# "<the deploy/repo clauses>". Shape validation cannot catch this — the
+# placeholder is a perfectly well-formed string.
+_PLACEHOLDER_RE = re.compile(r"^<[^<>\n]{1,120}>$")
+
+
+def _looks_like_placeholder(text: str) -> bool:
+    """True for a whole-string angle-bracket placeholder like ``<the ...>``.
+
+    Deliberately narrow: a real entry that merely CONTAINS a bracketed phrase
+    ("set DIM=<name> in the config") is legitimate content and must pass.
+    """
+    s = (text or "").strip()
+    if not s:
+        return True
+    return bool(_PLACEHOLDER_RE.match(s))
+
+
+def _reject_placeholder_content(a: Dict[str, Any], n: int, kind: str) -> None:
+    """Refuse a plan whose routed text is a prompt placeholder, not real content.
+
+    Refusing the whole plan is deliberate: a plan that shipped one placeholder
+    is a plan the model did not actually read the store to write, and applying
+    the rest of it would write half-understood content.
+    """
+    fields = ["text", "summary", "keep"]
+    for key in ("routes",):
+        for r in (a.get(key) or []):
+            if isinstance(r, dict):
+                for f in fields:
+                    if f in r and _looks_like_placeholder(str(r.get(f) or "")):
+                        raise PlanValidationError(
+                            f"Action #{n} route carries a PROMPT PLACEHOLDER in "
+                            f"{f!r} ({str(r.get(f))[:60]!r}) rather than real content — "
+                            f"Cerveau echoed the example from the prompt. Refusing "
+                            f"the plan instead of writing placeholder text to disk."
+                        )
+    for f in fields:
+        if f in a and _looks_like_placeholder(str(a.get(f) or "")):
+            raise PlanValidationError(
+                f"Action #{n} ({kind}) carries a PROMPT PLACEHOLDER in {f!r} "
+                f"({str(a.get(f))[:60]!r}) rather than real content — Cerveau "
+                f"echoed the example from the prompt. Refusing the plan."
+            )
 
 
 def render_report(

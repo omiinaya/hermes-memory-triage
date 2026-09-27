@@ -345,6 +345,18 @@ def _dispatch(sub: str, rest: List[str], *, from_tool: bool) -> str:
             return commands.cmd_status(cfg)
         if sub == "run":
             force = "--force" in rest or "-f" in rest
+            # `mode: auto` in config.json makes triage.execute_plan WRITE on the
+            # spot. A tool call is unattended just as much as the post_tool_call
+            # hook is, so both go through the same two brakes. Without this a
+            # single `mem_triage {"action":"run"}` from the model wrote a
+            # SKILL.md to disk with no human in the loop (2026-09-27).
+            if cfg.mode == "auto" and not _auto_run_allowed():
+                cfg.mode = "manual"
+                logger.info(
+                    "memtriage: auto mode downgraded to manual for this run "
+                    "(MEMTRIAGE_AUTO_RUN / MEMTRIAGE_ALLOW_WRITES not both set); "
+                    "a plan was produced but nothing was written."
+                )
             return commands.cmd_run(cfg, force=force)
         if sub == "review":
             return commands.cmd_review(cfg)

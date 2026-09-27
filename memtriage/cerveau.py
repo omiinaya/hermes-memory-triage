@@ -76,7 +76,9 @@ Routing taxonomy — choose ONE action per item:
     "routes": a list of routing actions (route-to-skill / route-to-provider /
               route-to-script) that receive the other clauses. Each route is
               {{"action": ..., "text": <clause>, ...}} — no "index" needed.
-  Example shape:
+  Example shape (the angle-bracket text below is a TEMPLATE — never copy it
+  into "text"/"keep"; always substitute the real clauses you read out of the
+  store, verbatim):
     {{"action": "split", "target": "user", "index": 0,
       "keep": "<the identity core, verbatim>",
       "routes": [{{"action": "route-to-skill", "skill_name": "team-doctrine",

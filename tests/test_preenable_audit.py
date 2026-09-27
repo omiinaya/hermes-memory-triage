@@ -596,3 +596,94 @@ def test_the_auto_triage_hook_returns_immediately(tmp_path, monkeypatch):
         f"a bounded hook at 30s"
     )
     assert started.wait(2.0), "the triage never started on the worker"
+
+
+# --- defect 12: Cerveau echoed the prompt's placeholder as real content ----
+#
+# A live run on 2026-09-27 created
+# /root/.hermes/skills/tools/team-doctrine/SKILL.md whose entire body was the
+# literal "<the deploy/repo clauses>" — the example from our own prompt.
+
+
+def test_a_whole_string_angle_placeholder_is_refused():
+    from memtriage.plan import validate, PlanValidationError
+    with pytest.raises(PlanValidationError) as e:
+        validate([{"action": "route-to-skill", "target": "memory", "index": 0,
+                   "skill_name": "team-doctrine",
+                   "text": "<the deploy/repo clauses>"}])
+    assert "PLACEHOLDER" in str(e.value)
+
+
+def test_a_placeholder_inside_a_split_route_is_refused():
+    from memtriage.plan import validate, PlanValidationError
+    with pytest.raises(PlanValidationError):
+        validate([{"action": "split", "target": "user", "index": 0,
+                   "keep": "Omar Minaya, cyber-name SULLEN.",
+                   "routes": [{"action": "route-to-skill",
+                               "skill_name": "x", "text": "<the other clauses>"}]}])
+
+
+def test_a_real_entry_containing_brackets_still_passes():
+    """Must not over-reject: a bracketed phrase inside real text is content."""
+    from memtriage.plan import validate
+    out = validate([{"action": "route-to-skill", "target": "memory", "index": 0,
+                     "skill_name": "cfg",
+                     "text": "Set DIM=<name> in the config before the render pass."}])
+    assert len(out) == 1
+    assert out[0]["text"].startswith("Set DIM=")
+
+
+def test_empty_routed_text_is_refused():
+    from memtriage.plan import validate, PlanValidationError
+    with pytest.raises(PlanValidationError):
+        validate([{"action": "route-to-skill", "target": "memory", "index": 0,
+                   "skill_name": "x", "text": "   "}])
+
+
+# --- defect 13: a TOOL call in auto mode wrote to disk unattended ----------
+#
+# _auto_run_allowed() gated the post_tool_call hook but not the tool, so one
+# `mem_triage {"action": "run"}` from the model applied the plan and wrote a
+# SKILL.md with nobody watching.
+
+
+def test_the_run_action_is_braked_too_not_just_the_hook(monkeypatch):
+    import importlib
+    mod = importlib.import_module("plugin")
+    seen = {}
+
+    def fake_cmd_run(cfg, force=False):
+        seen["mode"] = cfg.mode
+        return "ran"
+
+    monkeypatch.setattr(mod.commands, "cmd_run", fake_cmd_run)
+    for v in ("MEMTRIAGE_AUTO_RUN", "MEMTRIAGE_ALLOW_WRITES"):
+        monkeypatch.delenv(v, raising=False)
+
+    cfg = mod._load_cfg()
+    cfg.mode = "auto"
+    monkeypatch.setattr(mod, "_load_cfg", lambda: cfg)
+
+    out = mod._handle_tool({"action": "run"})
+    assert seen["mode"] == "manual", f"auto mode reached the executor: {seen}"
+
+
+def test_the_run_action_still_writes_when_both_brakes_are_set(monkeypatch):
+    import importlib
+    mod = importlib.import_module("plugin")
+    seen = {}
+
+    def fake_cmd_run(cfg, force=False):
+        seen["mode"] = cfg.mode
+        return "ran"
+
+    monkeypatch.setattr(mod.commands, "cmd_run", fake_cmd_run)
+    monkeypatch.setenv("MEMTRIAGE_AUTO_RUN", "1")
+    monkeypatch.setenv("MEMTRIAGE_ALLOW_WRITES", "1")
+
+    cfg = mod._load_cfg()
+    cfg.mode = "auto"
+    monkeypatch.setattr(mod, "_load_cfg", lambda: cfg)
+
+    mod._handle_tool({"action": "run"})
+    assert seen["mode"] == "auto", f"brakes blocked a deliberate auto run: {seen}"
