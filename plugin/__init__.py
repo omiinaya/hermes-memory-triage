@@ -42,7 +42,8 @@ logger = logging.getLogger(__name__)
 _ctx: Any = None
 
 SUBCOMMANDS = (
-    "status run review approve restore purge quarantine ledger config setup".split()
+    "status run review approve restore restore-file snapshots purge "
+    "quarantine ledger config setup".split()
 )
 
 TOOL_SCHEMA = {
@@ -53,6 +54,7 @@ TOOL_SCHEMA = {
             "enum": [
                 "status", "run", "review", "approve", "restore", "purge",
                 "quarantine", "ledger", "config", "setup",
+                "restore-file", "snapshots",
             ],
         },
         "force": {"type": "boolean", "description": "Run even if below threshold."},
@@ -269,6 +271,13 @@ def _dispatch(sub: str, rest: List[str], *, from_tool: bool) -> str:
             return commands.cmd_ledger(cfg)
         if sub == "config":
             return commands.cmd_config(cfg)
+        if sub == "snapshots":
+            target = rest[0] if rest else ""
+            return commands.cmd_snapshots(cfg, target=target)
+        if sub == "restore-file":
+            if len(rest) < 2:
+                return "Usage: memtriage restore-file <memory|user> <snapshot-name>"
+            return commands.cmd_restore_file(cfg, target=rest[0], name=rest[1])
         if sub == "setup":
             verify_only = "--verify" in rest
             return commands.cmd_setup(cfg, verify_only=verify_only)

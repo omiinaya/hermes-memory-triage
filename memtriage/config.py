@@ -37,6 +37,10 @@ DEFAULT_PROVIDER_BASE_URL = "http://127.0.0.1:8420"
 DEFAULT_RETAIN_REPORTS = 50
 DEFAULT_RETAIN_NOTIFIED_RUNS = 200
 DEFAULT_RETAIN_LEDGER_ROWS = 200
+# Pre-write snapshots of the store files. Separate from the other caps
+# because a snapshot is the ONLY thing that recovers a write that landed
+# wrong; quarantined entries cannot.
+DEFAULT_RETAIN_SNAPSHOTS = 30
 
 VALID_MODES = ("manual", "auto")
 
@@ -58,6 +62,7 @@ class Config:
     retain_reports: int = DEFAULT_RETAIN_REPORTS
     retain_notified_runs: int = DEFAULT_RETAIN_NOTIFIED_RUNS
     retain_ledger_rows: int = DEFAULT_RETAIN_LEDGER_ROWS
+    retain_snapshots: int = DEFAULT_RETAIN_SNAPSHOTS
     data_dir: Path = field(default_factory=lambda: _default_data_dir())
 
     def __post_init__(self) -> None:
@@ -127,6 +132,7 @@ class Config:
             "retain_reports": self.retain_reports,
             "retain_notified_runs": self.retain_notified_runs,
             "retain_ledger_rows": self.retain_ledger_rows,
+            "retain_snapshots": self.retain_snapshots,
             "data_dir": str(self.data_dir),
         }
 

@@ -7,13 +7,16 @@ The plugin surface (plugin/__init__.py) just maps sub-command names to these.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, Dict, List
 
 from . import inventory as inventory_mod
 from . import ledger as ledger_mod
 from . import plan as plan_mod
 from . import quarantine as quarantine_mod
+from . import snapshots as snapshots_mod
 from . import state as state_mod
+from . import store as memory_store_mod
 from .config import Config
 from .triage import apply_plan, run_triage
 
@@ -116,6 +119,52 @@ def cmd_approve(cfg: Config) -> str:
     for e in summary.get("errors", []):
         lines.append(f"  error: {e}")
     return "\n".join(lines)
+
+
+def cmd_snapshots(cfg: Config, target: str = "") -> str:
+    """List the pre-write snapshots available to restore from."""
+    snaps = snapshots_mod.list_snapshots(
+        cfg.data_dir, target or None
+    )
+    if not snaps:
+        return (
+            "No snapshots yet. One is taken automatically before every "
+            "write that changes a store, so this will populate after the "
+            "first mutating triage."
+        )
+    lines = [f"{len(snaps)} snapshot(s) in {snapshots_mod.snapshots_dir(cfg.data_dir)}:"]
+    for s in snaps[:30]:
+        lines.append(
+            f"- {s['name']}  {s['bytes']} bytes  {s['mtime_iso']}"
+        )
+    if len(snaps) > 30:
+        lines.append(f"  ... and {len(snaps) - 30} more")
+    lines.append(
+        "Restore with: memtriage restore-file <target> <snapshot-name>"
+    )
+    return "\n".join(lines)
+
+
+def cmd_restore_file(cfg: Config, target: str, name: str) -> str:
+    """Restore a pre-write snapshot over the live store file."""
+    if not target or not name:
+        return "Usage: memtriage restore-file <memory|user> <snapshot-name>"
+    if target not in ("memory", "user"):
+        return f"Unknown target {target!r} (expected 'memory' or 'user')."
+    out = snapshots_mod.restore(
+        cfg.data_dir, target, name, keep=cfg.retain_snapshots
+    )
+    if not out.get("restored"):
+        return f"Restore failed: {out.get('reason')}"
+    after = memory_store_mod.usage(target)
+    return (
+        f"Restored {target} from {Path(out['from']).name}.\n"
+        f"Now {after['current']:,}/{after['limit']:,} chars "
+        f"({len(after['entries'])} entries).\n"
+        f"The state it replaced was itself snapshotted — undo with: "
+        f"memtriage restore-file {target} "
+        f"{Path(out['undo_snapshot'] or '').name}"
+    )
 
 
 def cmd_restore(cfg: Config, text: str) -> str:

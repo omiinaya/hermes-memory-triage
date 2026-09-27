@@ -35,7 +35,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import ledger, locking, quarantine, store as memory_store
+from . import ledger, locking, quarantine, snapshots, store as memory_store
 from .config import Config
 
 # Marker file recording which run ids have already landed. A plan's indices
@@ -294,6 +294,9 @@ class Executor:
         # is actually rewritten. Keyed by target because the rebuild loop
         # handles each target independently.
         self._provisional: Dict[str, List[str]] = {}
+        # Pre-write snapshot paths taken this run, surfaced in the summary so
+        # a user can undo the whole run from the report.
+        self._snapshot_records: List[Dict[str, Any]] = []
 
     def _note(self, msg: str) -> None:
         self.applied.append(msg)
@@ -330,6 +333,7 @@ class Executor:
         self.pending = []
         self.errors = []
         self._provisional = {}
+        self._snapshot_records = []
         # Refusals the user must act on. Distinct from errors: an identity
         # guard refusal on an over-budget target is correct behaviour that
         # nonetheless leaves the store unrelieved, and it must be visible.
@@ -563,6 +567,28 @@ class Executor:
                     if i not in removals[target]
                 ]
             if final != original[target]:
+                # PRE-WRITE SNAPSHOT. Quarantine covers entries this plan
+                # removed; it does NOT cover the file this write replaces. The
+                # guards above have all passed, so this is the last moment
+                # before the live store is overwritten — and the content is
+                # final. A live incident on 2026-09-27 was a correct atomic
+                # write of WRONG content, which quarantine could not help
+                # with; this makes that a one-command restore.
+                snap = snapshots.take(
+                    self.cfg.data_dir, target, self._run_id,
+                    keep=self.cfg.retain_snapshots,
+                )
+                if snap and snap.get("ok"):
+                    self._snapshot_records.append(snap)
+                elif snap and snap.get("existed"):
+                    # Not fatal: the write is still atomic and reversible by
+                    # quarantine. But it must be visible, because it means a
+                    # botched write would be unrecoverable.
+                    self.errors.append(
+                        f"pre-write snapshot FAILED for {target} "
+                        f"({snap.get('reason')}); this write is not "
+                        f"byte-recoverable if it lands wrong"
+                    )
                 try:
                     memory_store.write_entries(target, final)
                 except OSError as exc:
@@ -636,6 +662,7 @@ class Executor:
             "before": before,
             "after": after,
             "lock_acquired": lock_acquired,
+            "snapshots": list(self._snapshot_records),
         }
 
     # -- per-action dispatch ---------------------------------------------
