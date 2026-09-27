@@ -28,6 +28,7 @@ VALID_ACTIONS = (
     "route-to-provider",
     "route-to-script",
     "evict-to-quarantine",
+    "split",
 )
 
 # Consolidation is the one action that must reference two or more entries by
@@ -231,6 +232,14 @@ def validate(actions: List[Any]) -> List[Dict[str, Any]]:
                 )
             if not a.get("text"):
                 raise PlanValidationError(f"consolidate action #{n} needs 'text'.")
+        if kind == "split":
+            if not isinstance(a.get("routes"), list) or not a.get("routes"):
+                raise PlanValidationError(
+                    f"split action #{n} needs at least one route in 'routes'."
+                )
+            if not a.get("keep"):
+                raise PlanValidationError(f"split action #{n} needs 'keep'.")
+
         # One mutating action per (target, index): a plan that both routed
         # entry #0 to a skill and consolidated it applied twice, leaving the
         # merged text appended beside the original it was meant to replace.

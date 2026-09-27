@@ -30,6 +30,13 @@ DEFAULT_CERVEAU_TIMEOUT = 600
 DEFAULT_DETERMINISTIC_FALLBACK = True
 DEFAULT_SCRIPTS_DIR = "~/.hermes/scripts"
 DEFAULT_PROVIDER_BASE_URL = "http://127.0.0.1:8420"
+# Retention: without a cap, state.json's notified_runs list, the ledger, and
+# the reports directory grow forever. Observed on the live install: 520 report
+# files / 840KB, 475 notified run ids, 73 ledger rows. Each mark_notified
+# rewrote the whole ~16KB file.
+DEFAULT_RETAIN_REPORTS = 50
+DEFAULT_RETAIN_NOTIFIED_RUNS = 200
+DEFAULT_RETAIN_LEDGER_ROWS = 200
 
 VALID_MODES = ("manual", "auto")
 
@@ -48,6 +55,9 @@ class Config:
     deterministic_fallback: bool = DEFAULT_DETERMINISTIC_FALLBACK
     scripts_dir: str = DEFAULT_SCRIPTS_DIR
     provider_base_url: str = DEFAULT_PROVIDER_BASE_URL
+    retain_reports: int = DEFAULT_RETAIN_REPORTS
+    retain_notified_runs: int = DEFAULT_RETAIN_NOTIFIED_RUNS
+    retain_ledger_rows: int = DEFAULT_RETAIN_LEDGER_ROWS
     data_dir: Path = field(default_factory=lambda: _default_data_dir())
 
     def __post_init__(self) -> None:
@@ -114,6 +124,9 @@ class Config:
             "deterministic_fallback": self.deterministic_fallback,
             "scripts_dir": self.scripts_dir,
             "provider_base_url": self.provider_base_url,
+            "retain_reports": self.retain_reports,
+            "retain_notified_runs": self.retain_notified_runs,
+            "retain_ledger_rows": self.retain_ledger_rows,
             "data_dir": str(self.data_dir),
         }
 

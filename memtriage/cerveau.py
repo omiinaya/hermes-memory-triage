@@ -67,6 +67,23 @@ Routing taxonomy — choose ONE action per item:
   entry; evict the older one. Never evict anything on a first pass unless it
   is clearly superseded.
 - "delete": never use. The plugin never hard-deletes on a triage pass.
+- "split": ONE oversized entry mixes identity with routable doctrine. Every
+  other action is whole-or-nothing, so the plugin's identity guard refuses
+  the entire blob and the store stays over budget forever. Use "split" to
+  keep the core and route the rest. Requires:
+    "keep":   the clause(s) that must STAY in the store (verbatim from the
+              source entry).
+    "routes": a list of routing actions (route-to-skill / route-to-provider /
+              route-to-script) that receive the other clauses. Each route is
+              {{"action": ..., "text": <clause>, ...}} — no "index" needed.
+  Example shape:
+    {{"action": "split", "target": "user", "index": 0,
+      "keep": "<the identity core, verbatim>",
+      "routes": [{{"action": "route-to-skill", "skill_name": "team-doctrine",
+                   "text": "<the deploy/repo clauses>"}}]}}
+  Splitting is the ONLY way to relieve a store whose pressure is one giant
+  identity entry. If you see such an entry, split it — do not "keep" it and
+  do not evict it.
 
 Staleness signals (from the user's doctrine):
 1. Superseded — a newer entry covers the same subject (new convention wins).
@@ -105,12 +122,14 @@ emit a "keep" action for it (action='keep', with its target and index and a
 helper reason) — NEVER return an empty array. The same inventory entry must
 not appear in more than one action.
 [{{
-  "action": "keep|consolidate|route-to-skill|route-to-profile|route-to-provider|route-to-script|evict-to-quarantine",
+  "action": "keep|consolidate|route-to-skill|route-to-profile|route-to-provider|route-to-script|evict-to-quarantine|split",
   "target": "memory|user",
   "index": 0,
   "text": "...",
   "reason": "short justification",
-  "skill_name": "...", "script_name": "...", "script_ext": "py"
+  "skill_name": "...", "script_name": "...", "script_ext": "py",
+  "keep": "<for split: the clause that stays>",
+  "routes": [<routing actions>]
 }}]
 """
 

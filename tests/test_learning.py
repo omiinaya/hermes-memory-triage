@@ -88,9 +88,26 @@ def test_templates_are_shipped():
         assert (tdir / f).is_file()
 
 
-def test_setup_command_verify_only_reports(cfg: Config):
+def test_setup_command_verify_only_reports(cfg: Config, monkeypatch):
+    """cmd_setup shells out to `hermes config get` twice with a 300s timeout.
+
+    Unpatched, this was a live, slow test: it invoked the real hermes binary
+    on every suite run. Stub the subprocess boundary so the test exercises
+    cmd_setup's own logic instead of the config CLI.
+    """
+    from memtriage import setup as setup_mod
     from memtriage.commands import cmd_setup
 
+    def fake_run(cmd, *a, **k):
+        import json as _json
+        import subprocess as _sp
+        if "model" in cmd:
+            return _sp.CompletedProcess(
+                cmd, 0, stdout=_json.dumps(
+                    {"default": "big-pickle", "provider": "custom"}), stderr="")
+        return _sp.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+
+    monkeypatch.setattr(setup_mod, "_run", fake_run)
     out = cmd_setup(cfg, verify_only=True)
     assert isinstance(out, str) and out
     assert "Cerveau profile" in out

@@ -28,13 +28,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import ledger, quarantine, store as memory_store
+from . import ledger, locking, quarantine, store as memory_store
 from .config import Config
 
 # Marker file recording which run ids have already landed. A plan's indices
@@ -312,8 +313,46 @@ class Executor:
         self.applied = []
         self.pending = []
         self.errors = []
+        # Refusals the user must act on. Distinct from errors: an identity
+        # guard refusal on an over-budget target is correct behaviour that
+        # nonetheless leaves the store unrelieved, and it must be visible.
+        self.blocked: List[Dict[str, Any]] = []
+        # Removals authorised by a `split`. A split is the identity guard's
+        # escape hatch: it keeps a verbatim clause of the entry in the store
+        # and routes the rest away, so the guard must not then refuse the
+        # removal and leave the store exactly as over budget as it was. The
+        # safety floor below still applies to a split.
+        self._split_removals: set = set()
         before = _usage_snapshot()
 
+        # EXCLUSIVITY: the built-in `memory` tool is a live writer on these
+        # same files, and the plugin's own hook fires from it. Without a lock,
+        # a `memory` append landing between our snapshot and our os.replace
+        # is silently discarded — and the index-staleness check cannot see
+        # it, because an append at the end leaves every index intact.
+        # Whichever writer gets here first wins; the other waits briefly.
+        ctx = locking.store_lock(memory_store.path_for(memory_store.TARGET_USER))
+        acquired = ctx.__enter__()
+        if not acquired:
+            self.errors.append(
+                "could not acquire the memory-store lock within the timeout; "
+                "another writer is active. Proceeding — verify the result."
+            )
+        try:
+            return self._execute_locked(
+                plan, run_id, provenance, before, acquired
+            )
+        finally:
+            ctx.__exit__(None, None, None)
+
+    def _execute_locked(
+        self,
+        actions: List[Dict[str, Any]],
+        run_id: str,
+        provenance: str,
+        before: Dict[str, Any],
+        lock_acquired: bool,
+    ) -> Dict[str, Any]:
         # CRITICAL: read the snapshot with the STRICT reader. A permissive
         # read that returns [] for an unreadable-but-present store used to
         # rebuild that store from an empty snapshot, overwriting the user's
@@ -332,8 +371,10 @@ class Executor:
                 "errors": [
                     f"ABORTED — store snapshot unreadable, nothing written: {exc}"
                 ],
+                "blocked": [],
                 "before": before,
                 "after": before,
+                "lock_acquired": lock_acquired,
             }
         removals: Dict[str, set] = {t: set() for t in original}    # idx -> drop
         # (target, idx) -> expected source text, taken from the plan when the
@@ -358,11 +399,13 @@ class Executor:
                     f"{already}; positional indices are not safe to replay. "
                     f"Nothing written."
                 ],
+                "blocked": [],
                 "before": before,
                 "after": before,
+                "lock_acquired": lock_acquired,
             }
 
-        for n, action in enumerate(plan):
+        for n, action in enumerate(actions):
             try:
                 self._apply(action, original, removals, appends, expected)
             except Exception as exc:  # noqa: BLE001
@@ -423,7 +466,32 @@ class Executor:
                         continue
                     text = original[target][i]
                     low = text.lower()
+                    if (target, i) in self._split_removals:
+                        # Already satisfied by a split: a verbatim clause of
+                        # this entry is being kept in its place.
+                        continue
                     if any(k in low for k in IDENTITY_MARKERS):
+                        # A guard refusal on an OVER-BUDGET target is the
+                        # condition the whole plugin exists to relieve. The
+                        # old code refused silently, so the run looked like a
+                        # clean all-keep while the store stayed pinned at its
+                        # wall for days. Record it as a named blocked state so
+                        # it surfaces in the report and to the user.
+                        self.blocked.append({
+                            "target": target,
+                            "index": i,
+                            "chars": len(text),
+                            "entries": len(original[target]),
+                            "over_budget": (
+                                memory_store.char_count(original[target])
+                                >= limit
+                            ),
+                            "hint": (
+                                "manual split required: this entry mixes "
+                                "identity with routable doctrine; use a "
+                                "'split' action (keep=<core>, routes=[...])"
+                            ),
+                        })
                         self.errors.append(
                             f"action would remove identity entry #{i} "
                             f"(identity/doctrine markers) — refused; kept"
@@ -527,8 +595,10 @@ class Executor:
             "applied": self.applied,
             "pending": self.pending,
             "errors": self.errors,
+            "blocked": self.blocked,
             "before": before,
             "after": after,
+            "lock_acquired": lock_acquired,
         }
 
     # -- per-action dispatch ---------------------------------------------
@@ -572,6 +642,9 @@ class Executor:
             return
         if kind == "evict-to-quarantine":
             self._do_evict(a, original, removals, expected)
+            return
+        if kind == "split":
+            self._do_split(a, original, removals, appends, expected)
             return
         raise ValueError(f"unhandled action {kind!r}")
 
@@ -759,6 +832,104 @@ class Executor:
             else:
                 self._note_pending(f"cron for '{script_name}': {result}")
         self._ledger("script", str(script_path), body[:200])
+
+    def _do_split(self, a, original, removals, appends, expected) -> None:
+        """Split one oversized entry: keep the identity core, route the rest.
+
+        This is the action that makes the plugin able to RELIEVE a profile
+        whose single entry is 2,988 of 2,996 chars and matches every identity
+        marker. Every other action is whole-or-nothing, so the identity guard
+        correctly refused the entire blob — including the clauses (viewing
+        rules, deployment doctrine, repo conventions) that genuinely belong in
+        a skill and are already mirrored there.
+
+        Contract:
+        * ``keep``  — the clause(s) that must STAY in the working store.
+        * ``routes``— a list of routing actions, each a normal action dict
+          WITHOUT a source index (the source is this entry).
+        * The original entry is removed and replaced by the kept clause(s).
+
+        A route that fails leaves its clause in the store rather than losing
+        it: split is deliberately partial-relief-or-nothing per route.
+        """
+        target = a.get("target", "user")
+        index = a.get("index")
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise ValueError(f"split needs an int index, got {index!r}")
+        entries = original.get(target) or []
+        if not (0 <= index < len(entries)):
+            raise IndexError(
+                f"source index {index} out of range for target {target!r} "
+                f"({len(entries)} entries)"
+            )
+        source_text = entries[index]
+        keep_text = (a.get("keep") or "").strip()
+        if not keep_text:
+            raise ValueError("split requires 'keep'")
+
+        # Fidelity check: the kept clause must actually come from the source.
+        # Otherwise a "split" could silently replace a real entry with
+        # unrelated text, which is data loss wearing a helpful hat.
+        probe = re.sub(r"\s+", " ", keep_text)[:60].strip().lower()
+        if probe and probe not in re.sub(r"\s+", " ", source_text).lower():
+            raise ValueError(
+                "split 'keep' does not appear in the source entry; refusing to "
+                "replace a real entry with unrelated text"
+            )
+
+        routed = []
+        retained: List[str] = []  # clauses whose route failed — must not be lost
+        for route in (a.get("routes") or []):
+            if not isinstance(route, dict):
+                raise ValueError(f"split routes must be objects, got {route!r}")
+            r = dict(route)
+            r.setdefault("index", index)
+            try:
+                if r.get("action") == "route-to-skill":
+                    self._do_skill(r, original)
+                elif r.get("action") == "route-to-provider":
+                    self._do_provider(r, original)
+                elif r.get("action") == "route-to-script":
+                    self._do_script(r, original)
+                else:
+                    raise ValueError(
+                        f"split route must be a routing action, got "
+                        f"{r.get('action')!r}"
+                    )
+                routed.append(r.get("action"))
+            except Exception as exc:  # noqa: BLE001
+                # The clause STAYS in the store. Dropping it here would make
+                # split lossy on any transient route failure — the entry is
+                # being removed, so anything not routed away is gone unless it
+                # is explicitly re-appended below.
+                clause = (r.get("text") or r.get("body") or "").strip()
+                if clause:
+                    retained.append(clause)
+                self.errors.append(
+                    f"split route {r.get('action')!r} failed ({exc}); its "
+                    f"clause stays in the store"
+                )
+
+        removals[target].add(index)
+        self._split_removals.add((target, index))
+        # The replacement is the kept clause plus any clause whose route
+        # failed, never the model's paraphrase of either.
+        replacement = keep_text
+        if retained:
+            replacement = keep_text + "\n" + "\n".join(retained)
+        appends[target].append(replacement)
+        # Only claim an expectation when the plan stated the source text; a
+        # self-assigned value would make the staleness check a no-op.
+        stated = a.get("text")
+        if isinstance(stated, str) and stated:
+            expected[(target, index)] = stated
+        self._note(
+            f"split {target}#{index} ({len(source_text)} chars) → kept "
+            f"{len(keep_text)} chars, routed {len(routed)} clause(s)"
+        )
+        self._ledger(
+            "split", f"{target}#split#{self._run_id}", keep_text[:80]
+        )
 
     def _do_evict(self, a, original, removals, expected) -> None:
         target = a.get("target", "memory")

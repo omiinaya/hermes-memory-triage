@@ -101,33 +101,22 @@ def char_limit(target: str) -> int:
 
 @contextlib.contextmanager
 def file_lock(path: Path) -> Iterator[None]:
-    """Exclusive advisory lock on ``<path>.lock`` (mirrors the built-in tool)."""
-    lock_path = path.with_suffix(path.suffix + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    if fcntl is None and msvcrt is None:
-        yield
-        return
-    fd = open(lock_path, "a+", encoding="utf-8")
+    """Exclusive advisory lock on the store, blocking.
+
+    Shares ONE lock file with :mod:`memtriage.locking` (the read-modify-write
+    span) so a write from a built-in-tool-mirroring function actually
+    excludes an executing plan, and vice versa. Previously this used a
+    separate ``.lock`` name and only spanned the write, so the two paths
+    could interleave freely.
+    """
+    from . import locking as _locking
+
+    ctx = _locking.store_lock(path, timeout=_locking.LOCK_WAIT_SECONDS)
+    ctx.__enter__()
     try:
-        if fcntl:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-        else:
-            fd.seek(0)
-            msvcrt.locking(fd.fileno(), msvcrt.LK_LOCK, 1)
         yield
     finally:
-        if fcntl:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            except (OSError, IOError):
-                pass
-        elif msvcrt:
-            try:
-                fd.seek(0)
-                msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
-            except (OSError, IOError):
-                pass
-        fd.close()
+        ctx.__exit__(None, None, None)
 
 
 class StoreUnreadable(RuntimeError):

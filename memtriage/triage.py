@@ -22,7 +22,9 @@ from typing import Any, Dict, List
 from . import cerveau as cerveau_mod
 from . import inventory as inventory_mod
 from . import ledger as ledger_mod
+from . import learning as learning_mod
 from . import plan as plan_mod
+from . import retention as retention_mod
 from . import state as state_mod
 from .config import Config
 from .executor import Executor
@@ -95,6 +97,7 @@ def run_triage(
         state_mod.record_execution(cfg, run_id, summary)
         result["execution"] = summary
         state_mod.mark_triage(cfg, run_id)
+        _close_learning_loop(cfg, run_id, summary, actions)
     else:
         plan_mod.save_plan(cfg, run_id, actions)
         state_mod.mark_awaiting_approval(cfg, run_id)
@@ -103,7 +106,54 @@ def run_triage(
             f"Triage plan ready ({len(actions)} actions). Review the report and "
             f"approve or edit it before applying."
         )
+    # Bounded-growth enforcement. Runs every pass regardless of mode: reports
+    # accumulate on manual plans too, and notified_runs grows on every run.
+    result["pruned"] = retention_mod.enforce_all(cfg)
     return result
+
+
+def _close_learning_loop(
+    cfg: Config,
+    run_id: str,
+    summary: Dict[str, Any],
+    actions: List[Dict[str, Any]],
+) -> None:
+    """Record what this run actually did into Cerveau's decision profile.
+
+    ``learning.record_decision`` existed and was fully implemented but was
+    never called from anywhere, so the profile's MEMORY.md held 0 learning
+    entries after 518 runs — the self-improvement loop was provably dead.
+    A model that cannot see its own past decisions cannot improve from them.
+    """
+    bits: List[str] = []
+    applied = summary.get("applied") or []
+    if applied:
+        bits.append("applied: " + "; ".join(str(a) for a in applied[:4]))
+    blocked = summary.get("blocked") or []
+    if blocked:
+        b = blocked[0]
+        bits.append(
+            f"REFUSED by identity guard: {b.get('target')}#{b.get('index')} "
+            f"({b.get('chars')} chars) — needs a manual split, not a retry"
+        )
+    errors = summary.get("errors") or []
+    if errors:
+        bits.append("errors: " + "; ".join(str(e) for e in errors[:3]))
+    counts: Dict[str, int] = {}
+    for a in actions:
+        k = str(a.get("action"))
+        counts[k] = counts.get(k, 0) + 1
+    if counts:
+        bits.append(
+            "plan: " + ", ".join(f"{k}×{v}" for k, v in sorted(counts.items()))
+        )
+    if not bits:
+        bits.append("no-op: every entry kept")
+    try:
+        learning_mod.record_decision(cfg, f"[{run_id}] " + " | ".join(bits))
+    except (OSError, ValueError):
+        # The learning log is a nice-to-have; never fail a triage over it.
+        pass
 
 
 def apply_plan(
