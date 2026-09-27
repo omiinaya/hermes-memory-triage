@@ -30,15 +30,34 @@ def test_already_routed(tmp_path):
     assert ledger.already_routed(cfg, "deploy") is True
 
 
-def test_same_destination_replaces(tmp_path):
+def test_same_destination_same_run_replaces(tmp_path):
+    """A replay of the SAME run overwrites — that is idempotency."""
     cfg = _cfg(tmp_path)
     ledger.record(cfg, kind="skill", destination="deploy", summary="v1",
                   run_id="r1", provenance="p")
     ledger.record(cfg, kind="skill", destination="deploy", summary="v2",
-                  run_id="r2", provenance="p")
+                  run_id="r1", provenance="p")
     loaded = ledger.load(cfg)
     assert len(loaded) == 1
     assert loaded[0]["summary"] == "v2"
+
+
+def test_different_runs_are_both_retained(tmp_path):
+    """A DIFFERENT run must not erase the previous run's audit record.
+
+    Regression: record() dropped any prior entry with the same destination, so
+    every later consolidation to "{target}#consolidated" overwrote the earlier
+    one and already_routed() then permanently reported the content as handled.
+    """
+    cfg = _cfg(tmp_path)
+    ledger.record(cfg, kind="consolidate", destination="memory#consolidated",
+                  summary="first merge", run_id="r1", provenance="p")
+    ledger.record(cfg, kind="consolidate", destination="memory#consolidated",
+                  summary="second merge", run_id="r2", provenance="p")
+    loaded = ledger.load(cfg)
+    assert len(loaded) == 2
+    assert {e["summary"] for e in loaded} == {"first merge", "second merge"}
+    assert ledger.already_routed(cfg, "memory#consolidated") is True
 
 
 def test_summary_empty_then_populated(tmp_path):

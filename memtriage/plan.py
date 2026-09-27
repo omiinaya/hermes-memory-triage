@@ -125,7 +125,26 @@ def parse_plan(raw: str) -> List[Dict[str, Any]]:
         except json.JSONDecodeError as exc:
             last_err = exc
     if valid:
-        return valid[-1]  # the model commits to the plan at the END of its reply
+        # Ambiguity is a refusal, not a coin flip. A reply can contain more
+        # than one well-formed action array: the real plan plus a recap, or
+        # the prompt's own schema example echoed back. The old code returned
+        # valid[-1], so a trailing all-keep recap SILENTLY replaced a real
+        # routing plan — triage reported success and freed nothing. When two
+        # candidates are not obviously the same plan, refuse and let the
+        # deterministic fallback run rather than guess.
+        if len(valid) == 1:
+            return valid[0]
+        # Prefer a strictly longer plan: the real plan always covers at least
+        # as many entries as a recap of it.
+        by_len = sorted(valid, key=len, reverse=True)
+        if len(by_len[0]) > len(by_len[1]):
+            return by_len[0]
+        # Genuinely ambiguous (equal length, different content) — do not pick.
+        raise PlanValidationError(
+            f"Ambiguous Cerve reply: {len(valid)} distinct action arrays of "
+            f"equal length; refusing to guess. The model emitted a plan and "
+            f"then restated it differently."
+        )
     raise PlanValidationError(
         f"No non-empty action array in Cerve reply"
         + (f" ({last_err})" if last_err else "")
@@ -170,6 +189,7 @@ def validate(actions: List[Any]) -> List[Dict[str, Any]]:
     if not isinstance(actions, list):
         raise PlanValidationError("Plan must be a JSON array of actions.")
     out: List[Dict[str, Any]] = []
+    seen_touched: set = set()
     for n, a in enumerate(actions):
         if not isinstance(a, dict):
             raise PlanValidationError(f"Action #{n} is not an object.")
@@ -196,8 +216,40 @@ def validate(actions: List[Any]) -> List[Dict[str, Any]]:
                 raise PlanValidationError(
                     f"consolidate action #{n} needs ≥2 entry indices."
                 )
+            # Distinct ints, not just length: entries=[0, 0] satisfied the old
+            # len>=2 check and then replaced a single real entry with the
+            # "merged" text while claiming a two-entry merge.
+            if any(isinstance(i, bool) or not isinstance(i, int) for i in entries):
+                raise PlanValidationError(
+                    f"consolidate action #{n} entries must all be ints, "
+                    f"got {entries!r}."
+                )
+            if len(set(entries)) < 2:
+                raise PlanValidationError(
+                    f"consolidate action #{n} needs ≥2 DISTINCT entry indices, "
+                    f"got {entries!r} — a repeated index is not a merge."
+                )
             if not a.get("text"):
                 raise PlanValidationError(f"consolidate action #{n} needs 'text'.")
+        # One mutating action per (target, index): a plan that both routed
+        # entry #0 to a skill and consolidated it applied twice, leaving the
+        # merged text appended beside the original it was meant to replace.
+        if kind not in ("keep",):
+            idx = a.get("index")
+            if kind == "consolidate":
+                touched = {(a.get("target", "memory"), i) for i in (a.get("entries") or [])}
+            elif isinstance(idx, int) and not isinstance(idx, bool):
+                touched = {(a.get("target", "memory"), idx)}
+            else:
+                touched = set()
+            for key in touched:
+                if key in seen_touched:
+                    raise PlanValidationError(
+                        f"Action #{n} ({kind}) touches {key[0]}#{key[1]}, "
+                        f"which an earlier action already mutates. One action "
+                        f"per entry."
+                    )
+                seen_touched.add(key)
         out.append(dict(a))
     return out
 

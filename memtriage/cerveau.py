@@ -13,10 +13,12 @@ misbehaving profile from hanging or flooding the triage.
 from __future__ import annotations
 
 import json
+import os
+import re
+import signal
 import subprocess
 from typing import Any, Dict, List
 
-import os
 from .config import Config
 from .plan import PlanValidationError, parse_plan
 
@@ -25,7 +27,6 @@ from .plan import PlanValidationError, parse_plan
 # spawn) over the proxy relay, which averages ~9.6s/token and may chain fallbacks.
 # A 74KB inventory against that path routinely exceeds 240s, so we (a) default
 # higher and (b) let operators raise it via CERVEAU_TIMEOUT without a code change.
-DEFAULT_TIMEOUT_SECONDS = int(os.environ.get("CERVEAU_TIMEOUT", "600"))
 # Cap reply so a runaway profile can't flood the store write-back.
 MAX_REPLY_CHARS = 60_000
 
@@ -126,10 +127,32 @@ PROTECTED_MARKERS = (
     "hermes-agent", "shutdown", "reboot",
 )
 # Throwaway / low-priority → eligible for (reversible) quarantine.
+# These are matched on WORD BOUNDARIES, not raw substrings: the old
+# substring list contained "test " which matched "latest", "greatest" and
+# "protest ", so ordinary doctrine ("PVE host 3090: latest nvidia driver
+# pinned") became an eviction candidate and, in auto mode, was evicted
+# unapproved.
 LOW_PRIORITY_MARKERS = (
-    "throwaway", "disposable", "temp ", "tmp/", "/tmp/", "scratch",
-    "audit", "debug", "check_", "test ", "stale", "dead code",
+    "throwaway", "disposable", "scratch", "dead code",
+    "debug", "debugging", "stale", "audit", "tmp",
 )
+
+
+def _matches(text: str, markers: tuple) -> List[str]:
+    """Return the markers present in ``text``, matched on word boundaries.
+
+    A bare substring test is unsafe for both marker sets: ``"test "`` matches
+    ``"latest"``, and ``"token"`` matches ``"tokenizer"``/``"token budget"``.
+    Underscores and hyphens are treated as word characters so ``check_x`` and
+    ``dead-code`` still match while ``latest`` does not.
+    """
+    low = text.lower()
+    hits: List[str] = []
+    for marker in markers:
+        pattern = r"(?<![A-Za-z0-9])" + re.escape(marker).replace(r"\ ", r"[ _\-]+") + r"(?![A-Za-z0-9])"
+        if re.search(pattern, low):
+            hits.append(marker)
+    return hits
 
 
 def _truncate_payload(payload: Dict[str, Any], max_chars: int = DEFAULT_MAX_PAYLOAD_CHARS) -> Dict[str, Any]:
@@ -200,7 +223,13 @@ def _deterministic_plan(inv: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     actions: List[Dict[str, Any]] = []
     fallback_source = {"_source": "deterministic-fallback"}  # marker for run_triage
-    seen_subject: Dict[str, List[int]] = {}  # subject-key -> entry indices to consolidate
+    # CRITICAL: keyed by (target, subject), NOT subject alone. The old code
+    # declared this dict ONCE outside the per-target loop and stored bare
+    # indices, so memory#0 and user#1 sharing a subject key produced a
+    # consolidate action with target="memory" but entries=[0, 1] — and the
+    # executor then removed memory#1, an entry that had nothing to do with the
+    # merge. Silent, unquarantined loss of a real memory entry.
+    seen_subject: Dict[tuple, List[Dict[str, Any]]] = {}  # (target, subject) -> entries
 
     def _subject_key(text: str) -> str:
         """Stable key for 'same subject across entries'.
@@ -210,13 +239,12 @@ def _deterministic_plan(inv: Dict[str, Any]) -> List[Dict[str, Any]]:
         vs 'User: Omar Minaya (cyber-name...)') collapse to the same key.
         We strip leading role prefixes too so 'User: X' and 'X' group.
         """
-        import re as _re
         low = text[:40].lower()
         for p in ("user: ", "memory: ", "sullen:"):
             if low.startswith(p):
                 low = low[len(p):]
         # drop punctuation so em-dashes / parens don't split identical subjects
-        low = _re.sub(r"[^\w\s]", " ", low)
+        low = re.sub(r"[^\w\s]", " ", low)
         return " ".join(low.split()[:4])
 
     for target_block in inv.get("memory", []):
@@ -225,42 +253,48 @@ def _deterministic_plan(inv: Dict[str, Any]) -> List[Dict[str, Any]]:
         for e in entries:
             idx = e["index"]
             text = e.get("text", "") or ""
-            low = text.lower()
-            if any(k in low for k in PROTECTED_MARKERS):
+            if _matches(text, PROTECTED_MARKERS):
                 actions.append({"_source": "deterministic-fallback", "action": "keep", "target": target, "index": idx,
                                 "reason": "identity/security/env-critical — never evict"})
                 continue
-            if any(k in low for k in LOW_PRIORITY_MARKERS):
+            if _matches(text, LOW_PRIORITY_MARKERS):
                 actions.append({"_source": "deterministic-fallback", "action": "evict-to-quarantine", "target": target,
                                 "index": idx,
                                 "text": text,
                                 "reason": "throwaway/debug artifact — low value, reversible quarantine"})
                 continue
-            seen_subject.setdefault(_subject_key(text), []).append(idx)
+            seen_subject.setdefault((target, _subject_key(text)), []).append(e)
             actions.append({"_source": "deterministic-fallback", "action": "keep", "target": target, "index": idx,
                             "reason": "no stale/superceded signal — retain"})
 
-    # 2) Consolidation pass: merge entries whose subject-key repeats. The
-    #    doctrine values explanation, so we only collapse genuine duplicates
-    #    — the user profile is currently stated ~2 ways in USER store, which is
-    #    the real 95%-pressure source.
-    for subj, idxs in list(seen_subject.items()):
-        if len(idxs) > 1:
-            # resolve target + representative text from the inventory directly
-            # (the outer loop's locals are out of scope here).
-            first_entry = next(
-                (e for blk in inv.get("memory", [])
-                 for e in blk.get("entries", []) if e["index"] == idxs[0]),
-                None
+    # 2) Consolidation pass: merge entries whose subject-key repeats WITHIN the
+    #    same target. The bucket key now carries the target, so indices from
+    #    two different stores can never be merged together.
+    for (tgt, subj), entries_list in list(seen_subject.items()):
+        idxs = [e["index"] for e in entries_list]
+        if len(set(idxs)) > 1:
+            # The inventory caps entry text (160 chars for the memory target),
+            # so the inventory copy CANNOT be used as the merge body — writing
+            # it back would silently discard the remainder of every entry with
+            # no quarantine record. Only merge when the inventory copy is
+            # byte-faithful; otherwise keep (the executor enforces the same
+            # rule as a second line of defence).
+            sources = list(entries_list)
+            truncated = any(
+                (s.get("chars") or 0) > len(s.get("text") or "") for s in sources
             )
-            if first_entry is None:
+            if truncated:
+                actions.append({"_source": "deterministic-fallback", "action": "keep", "target": tgt,
+                                "index": idxs[0],
+                                "reason": (
+                                    f"same subject {subj!r} stated {len(idxs)} ways, but "
+                                    f"the inventory copy is truncated — refusing to "
+                                    f"merge (would discard the rest, unquarantined)"
+                                )})
                 continue
-            tgt = next(
-                (blk["target"] for blk in inv.get("memory", [])
-                 if blk.get("entries") and blk["entries"][0]["index"] == idxs[0]),
-                "memory"
-            )
-            actions.append({"action": "consolidate", "target": tgt,
+            first_entry = sources[0]
+            actions.append({"_source": "deterministic-fallback",
+                            "action": "consolidate", "target": tgt,
                             "entries": idxs, "index": idxs[0],
                             "text": first_entry.get("text", ""),
                             "reason": f"same subject '{subj}' stated {len(idxs)} ways; merge (deterministic fallback)"})
@@ -294,6 +328,14 @@ def dispatch(
             capture_output=True,
             text=True,
             timeout=timeout,
+            # Own process group: `hermes -p cerveau` spawns its own children,
+            # and a timeout SIGKILL to the direct child alone orphaned the
+            # whole tree on every slow dispatch.
+            start_new_session=True,
+            # Non-UTF-8 child output raised UnicodeDecodeError straight out
+            # of subprocess.run, bypassing the deterministic fallback.
+            encoding="utf-8",
+            errors="replace",
         )
     except FileNotFoundError as exc:
         if cfg.deterministic_fallback and inventory is not None:
@@ -310,6 +352,17 @@ def dispatch(
         raise RuntimeError(
             f"Cerveau triage timed out after {timeout}s."
         )
+    except OSError as exc:
+        # E2BIG (errno 7) is the one that matters: the prompt is a single argv
+        # element and Linux caps one at MAX_ARG_STRLEN (131072 bytes). An
+        # over-cap inventory raised a bare OSError that escaped every handler,
+        # turning "degraded" into "crashed" and skipping the fallback entirely.
+        if cfg.deterministic_fallback and inventory is not None:
+            return _deterministic_plan(inventory)
+        raise RuntimeError(
+            f"Cerveau dispatch failed ({type(exc).__name__}: {exc}); "
+            f"the prompt may exceed the OS argv limit"
+        ) from exc
     reply = (proc.stdout or "")[-MAX_REPLY_CHARS:]
     if proc.returncode != 0:
         stderr = (proc.stderr or "")[-2000:]

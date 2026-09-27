@@ -18,6 +18,25 @@ from .config import Config
 from .triage import apply_plan, run_triage
 
 
+def cmd_setup(cfg: Config, verify_only: bool = False) -> str:
+    """Provision (or verify) the Cerveau decision profile.
+
+    ``setup.py`` was written but never wired into the command surface, so the
+    profile could not be created, seeded, or verified from inside the plugin —
+    the two tests that exercised it had been failing since it landed.
+    """
+    from . import setup as setup_mod
+
+    if verify_only:
+        report = setup_mod.verify(cfg)
+        return f"Cerveau profile '{cfg.cerveau_profile}' — {report}"
+    steps = setup_mod.provision(cfg)
+    lines = [f"Cerveau setup for '{cfg.cerveau_profile}':"]
+    for step, outcome in steps.items():
+        lines.append(f"  - {step}: {outcome}")
+    return "\n".join(lines)
+
+
 def cmd_status(cfg: Config) -> str:
     usage = inventory_mod.inventory_memory(cfg)
     lines = [

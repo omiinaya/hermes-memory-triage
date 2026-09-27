@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 _ctx: Any = None
 
 SUBCOMMANDS = (
-    "status run review approve restore purge quarantine ledger config".split()
+    "status run review approve restore purge quarantine ledger config setup".split()
 )
 
 TOOL_SCHEMA = {
@@ -59,7 +59,7 @@ TOOL_SCHEMA = {
             "type": "string",
             "enum": [
                 "status", "run", "review", "approve", "restore", "purge",
-                "quarantine", "ledger", "config",
+                "quarantine", "ledger", "config", "setup",
             ],
         },
         "force": {"type": "boolean", "description": "Run even if below threshold."},
@@ -276,6 +276,9 @@ def _dispatch(sub: str, rest: List[str], *, from_tool: bool) -> str:
             return commands.cmd_ledger(cfg)
         if sub == "config":
             return commands.cmd_config(cfg)
+        if sub == "setup":
+            verify_only = "--verify" in rest
+            return commands.cmd_setup(cfg, verify_only=verify_only)
     except Exception as exc:  # noqa: BLE001
         return f"memtriage {sub} failed: {exc}"
     return (

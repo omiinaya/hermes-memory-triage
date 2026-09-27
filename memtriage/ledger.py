@@ -47,7 +47,14 @@ def record(
     run_id: str,
     provenance: str,
 ) -> None:
-    """Record one routed artifact. Idempotent re-runs overwrite cleanly."""
+    """Record one routed artifact.
+
+    A re-run of the SAME (kind, destination) with the SAME run_id is an
+    idempotent overwrite. A DIFFERENT run_id appends a new record instead of
+    erasing the previous one — keying only on destination meant every later
+    consolidation overwrote the earlier run's audit record, and
+    ``already_routed`` then permanently reported the content as handled.
+    """
     ledger = _load(cfg)
     entry = {
         "kind": kind,  # skill | user | provider | script | consolidate
@@ -57,8 +64,10 @@ def record(
         "provenance": provenance,
         "routed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
-    # Drop any prior record for the same destination (it changed) then append.
-    ledger = [r for r in ledger if r.get("destination") != destination]
+    ledger = [
+        r for r in ledger
+        if not (r.get("destination") == destination and r.get("run_id") == run_id)
+    ]
     ledger.append(entry)
     _write(cfg, ledger)
 

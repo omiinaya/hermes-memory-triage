@@ -29,11 +29,30 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
+import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import ledger, quarantine, store as memory_store
 from .config import Config
+
+# Marker file recording which run ids have already landed. A plan's indices
+# are positional, so a replay resolves them against a shifted store and would
+# delete unrelated entries — refuse the replay instead.
+APPLIED_RUNS_FILENAME = "applied_runs.json"
+MAX_APPLIED_RUNS = 200
+
+# Identity/doctrine markers that make a "user" entry un-removable. Mirrors
+# the intent of cerveau.PROTECTED_MARKERS but is the executor's own single
+# source of truth so the fallback and the executor cannot drift apart.
+# Deliberately SPECIFIC names/claims, not topic words: a bare "identity" marker
+# made every entry mentioning the identity guard itself un-removable, which
+# blocks exactly the doctrine routing that should be moved to a skill.
+IDENTITY_MARKERS = (
+    "sullen", "minaya", "never evict", "voice boundary", "vault",
+    "cyber-name", "guarded", "ciel", "real name",
+)
 
 SKILL_FRONTMATTER = """---
 name: {name}
@@ -54,11 +73,98 @@ def _safe(value: str) -> str:
     return cleaned or "untitled"
 
 
+def _already_applied(cfg: Config, run_id: str) -> Optional[str]:
+    """Return the ISO timestamp when ``run_id`` was already applied, else None.
+
+    Reads the applied-runs marker file, which is the ONLY reliable way to
+    detect a replay: plan indices are positional, so once a run has landed,
+    the same indices refer to different (or no) entries.
+    """
+    if not run_id:
+        return None
+    path = cfg.data_dir / APPLIED_RUNS_FILENAME
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    return raw.get(run_id)
+
+
+def _mark_applied(cfg: Config, run_id: str) -> None:
+    """Record that ``run_id`` landed, so a retry is refused, not replayed."""
+    if not run_id:
+        return
+    path = cfg.data_dir / APPLIED_RUNS_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raw = {}
+    except (json.JSONDecodeError, OSError):
+        raw = {}
+    raw[run_id] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    # Bound growth: keep the newest 200 run ids.
+    if len(raw) > MAX_APPLIED_RUNS:
+        keep = sorted(raw.items())[-MAX_APPLIED_RUNS:]
+        raw = dict(keep)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=path.name + ".", suffix=".tmp"
+    )
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(raw, fh, indent=2)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _yaml_scalar(value: str) -> str:
+    """Escape a value for a position that ALREADY has surrounding quotes.
+
+    The skill frontmatter template writes ``provenance: "{value}"``, so this
+    escapes the interior only. Do NOT add another layer of quotes here.
+    """
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", " ")
+        .replace("\r", " ")
+    )
+
+
+def _yaml_quote(value: str) -> str:
+    """Quote a scalar for YAML frontmatter, quotes included.
+
+    A body-derived description containing ``": "``, a leading ``#``, or a
+    quote produced invalid frontmatter, which silently made the new skill
+    invisible to ``inventory_skills`` — routed knowledge that could never be
+    loaded again. Always double-quote and escape.
+    """
+    return f'"{_yaml_scalar(value)}"'
+
+
 def _write_atomic(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
-    os.replace(tmp, path)
+    # Unique tmp name: a fixed "<name>.tmp" races with a concurrent executor
+    # and can publish a half-written file.
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=path.name + ".", suffix=".tmp"
+    )
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _make_executable(path: Path) -> None:
@@ -180,6 +286,9 @@ class Executor:
         self.errors: List[str] = []
         self._run_id = ""
         self._provenance = ""
+        # Quarantine writes are buffered until a removal has survived every
+        # guard, so a refused eviction leaves no phantom record.
+        self._pending_quarantine: List[Tuple[str, str]] = []
 
     def _note(self, msg: str) -> None:
         self.applied.append(msg)
@@ -199,18 +308,63 @@ class Executor:
         """Apply the plan and its routing/evict/consolidate removals."""
         self._run_id = run_id
         self._provenance = provenance
+        # A reused Executor must not concatenate two runs' results.
+        self.applied = []
+        self.pending = []
+        self.errors = []
         before = _usage_snapshot()
 
-        original: Dict[str, List[str]] = {
-            t: memory_store.read_entries(t)
-            for t in (memory_store.TARGET_MEMORY, memory_store.TARGET_USER)
-        }
+        # CRITICAL: read the snapshot with the STRICT reader. A permissive
+        # read that returns [] for an unreadable-but-present store used to
+        # rebuild that store from an empty snapshot, overwriting the user's
+        # real profile with a single entry. Abort the whole plan instead.
+        try:
+            original: Dict[str, List[str]] = {
+                t: memory_store.read_entries_strict(t)
+                for t in (memory_store.TARGET_MEMORY, memory_store.TARGET_USER)
+            }
+        except memory_store.StoreUnreadable as exc:
+            # Nothing is written. The plan is not partially applied because
+            # it is not applied at all.
+            return {
+                "applied": [],
+                "pending": [],
+                "errors": [
+                    f"ABORTED — store snapshot unreadable, nothing written: {exc}"
+                ],
+                "before": before,
+                "after": before,
+            }
         removals: Dict[str, set] = {t: set() for t in original}    # idx -> drop
+        # (target, idx) -> expected source text, taken from the plan when the
+        # plan states it. At rebuild time a removal is honoured only if the
+        # entry at that index is still the one the plan named.
+        expected: Dict[Tuple[str, int], str] = {}
         appends: Dict[str, List[str]] = {t: [] for t in original}  # new entries
+
+        # IDEMPOTENCY: refuse to apply the same run twice. Indices are
+        # positional, so re-applying a plan after it already landed would
+        # resolve them against a store that has since shifted and remove
+        # unrelated entries. This is the guard that actually makes retries
+        # safe — comparing the plan's own text against the current store
+        # cannot distinguish "shifted" from "legitimately rewritten".
+        already = _already_applied(self.cfg, run_id)
+        if already:
+            return {
+                "applied": [],
+                "pending": [],
+                "errors": [
+                    f"ABORTED — run {run_id!r} was already applied at "
+                    f"{already}; positional indices are not safe to replay. "
+                    f"Nothing written."
+                ],
+                "before": before,
+                "after": before,
+            }
 
         for n, action in enumerate(plan):
             try:
-                self._apply(action, original, removals, appends)
+                self._apply(action, original, removals, appends, expected)
             except Exception as exc:  # noqa: BLE001
                 self.errors.append(
                     f"action #{n} ({action.get('action')}): {exc}"
@@ -233,18 +387,43 @@ class Executor:
         # belongs in the working profile. (mirror cerveau.PROTECTED_MARKERS)
         for target in original:
             limit = memory_store.char_limit(target)
-            removals[target] = {
-                i for i in removals[target]
-                if 0 <= i < len(original[target])  # drop out-of-range
-            }
+            # Honour a removal only if the entry at that index is still the
+            # one the plan named. A stale plan (retried after a partial
+            # apply, or shifted by a concurrent memory-tool write) would
+            # otherwise delete an unrelated entry.
+            for i in list(removals[target]):
+                want = expected.get((target, i))
+                if want is None:
+                    continue
+                if not (0 <= i < len(original[target])):
+                    removals[target].discard(i)
+                    self.errors.append(
+                        f"removal {target}#{i} out of range — dropped from plan"
+                    )
+                elif original[target][i] != want:
+                    # The plan named the text it expected at this index and
+                    # something else is there now (a concurrent memory-tool
+                    # write, or an earlier run of this same plan). Refuse
+                    # rather than delete an unrelated entry.
+                    removals[target].discard(i)
+                    self.errors.append(
+                        f"removal {target}#{i} is stale — that index now holds a "
+                        f"different entry; refusing to delete it"
+                    )
             if target == memory_store.TARGET_USER:
                 for i in list(removals[target]):
+                    # Bounds-check: the staleness pass above may have left an
+                    # index that is no longer addressable, and this loop used
+                    # to index blindly and crash the whole rebuild.
+                    if not (0 <= i < len(original[target])):
+                        removals[target].discard(i)
+                        self.errors.append(
+                            f"removal {target}#{i} out of range — dropped from plan"
+                        )
+                        continue
                     text = original[target][i]
                     low = text.lower()
-                    if any(k in low for k in (
-                        "sullen", "minaya", "never evict", "voice boundary",
-                        "vault", "cyber-name",
-                    )):
+                    if any(k in low for k in IDENTITY_MARKERS):
                         self.errors.append(
                             f"action would remove identity entry #{i} "
                             f"(identity/doctrine markers) — refused; kept"
@@ -273,17 +452,75 @@ class Executor:
                 removals[target] = set()  # keep everything in place
                 kept = list(original[target])
                 final = kept + appends[target]
+            # The "never empty memory" rule was dead: floor==0.0 made
+            # `post_fraction < floor` unsatisfiable. Special-case it.
+            if target == memory_store.TARGET_MEMORY and removals[target] and not final:
+                self.errors.append(
+                    "target 'memory' would be emptied entirely — refused; "
+                    "source entries kept"
+                )
+                removals[target] = set()
+                final = list(original[target])
+            # Do not push a target PAST its own limit — once over, every
+            # built-in `append` is refused for the rest of the session.
+            if limit and memory_store.char_count(final) > limit and appends[target]:
+                self.errors.append(
+                    f"target '{target}' would exceed its {limit:,}-char limit "
+                    f"({memory_store.char_count(final):,} with appends) — "
+                    f"appends dropped, removals kept"
+                )
+                appends[target] = []
+                final = [
+                    e for i, e in enumerate(original[target])
+                    if i not in removals[target]
+                ]
             if final != original[target]:
-                memory_store.write_entries(target, final)
-                # Only count in-range removal indices when reporting freed
-                # chars — a hallucinated/out-of-range index (e.g. a stale
-                # ledger reference) must not crash the whole rebuild.
+                try:
+                    memory_store.write_entries(target, final)
+                except OSError as exc:
+                    # One target failing must not abort the other or lose the
+                    # record of what already committed.
+                    self.errors.append(
+                        f"writing target '{target}' failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    continue
+                # Quarantine is flushed only for removals that SURVIVED every
+                # guard, so a refused eviction never leaves a phantom record
+                # that `restore` would later duplicate.
+                for i in sorted(removals[target]):
+                    if 0 <= i < len(original[target]):
+                        self._pending_quarantine.append(
+                            (target, original[target][i])
+                        )
                 freed = sum(
                     len(original[target][i])
                     for i in removals[target]
                     if 0 <= i < len(original[target])
                 )
                 self.applied.append(f"freed {freed} chars [{target}]")
+
+        # Quarantine is flushed ONLY for removals that survived every guard and
+        # were actually written. A refused eviction therefore leaves no record,
+        # so `restore` can never re-append an entry that is still live.
+        for q_target, q_text in self._pending_quarantine:
+            try:
+                quarantine.evict(
+                    self.cfg, target=q_target, text=q_text,
+                    reason=f"removed by run {self._run_id}", run_id=self._run_id,
+                )
+            except OSError as exc:
+                self.errors.append(
+                    f"quarantine write failed for {q_target}: {exc}"
+                )
+        self._pending_quarantine = []
+
+        # Record the run as landed so a retry is refused rather than replayed
+        # against a store whose indices have since shifted.
+        try:
+            _mark_applied(self.cfg, self._run_id)
+        except OSError as exc:
+            self.errors.append(f"could not record run id for replay safety: {exc}")
 
         after = _usage_snapshot()
         return {
@@ -296,69 +533,167 @@ class Executor:
 
     # -- per-action dispatch ---------------------------------------------
 
-    def _apply(self, a: Dict[str, Any], original, removals, appends) -> None:
+    def _apply(
+        self, a: Dict[str, Any], original, removals, appends, expected
+    ) -> None:
         kind = a["action"]
         target = a.get("target", "memory")
+        # An unknown target creates a removal key the rebuild loop never visits,
+        # so the side effect commits while the source entry silently stays —
+        # a permanent duplicate that the ledger then says is already handled.
+        if target not in (memory_store.TARGET_MEMORY, memory_store.TARGET_USER):
+            raise ValueError(
+                f"unknown target {target!r} "
+                f"(expected {memory_store.TARGET_MEMORY!r} or {memory_store.TARGET_USER!r})"
+            )
         if kind == "keep":
             return
         if kind == "consolidate":
-            self._do_consolidate(a, removals, appends)
+            self._do_consolidate(a, original, removals, appends, expected)
             return
         if kind == "route-to-skill":
-            self._do_skill(a)
-            self._remove_source(removals, a)
+            self._do_skill(a, original)
+            self._remove_source(removals, a, original, expected)
             return
         if kind == "route-to-profile":
             self._do_profile(a, appends)
-            self._remove_source(removals, a)
+            self._remove_source(removals, a, original, expected)
             return
         if kind == "route-to-provider":
-            ok = self._do_provider(a)
+            ok = self._do_provider(a, original)
             if ok:
-                self._remove_source(removals, a)
+                self._remove_source(removals, a, original, expected)
             else:
                 self._note_pending("route-to-provider: kept source entry (gateway write failed)")
             return
         if kind == "route-to-script":
-            self._do_script(a)
-            self._remove_source(removals, a)
+            self._do_script(a, original)
+            self._remove_source(removals, a, original, expected)
             return
         if kind == "evict-to-quarantine":
-            self._do_evict(a, original, removals)
+            self._do_evict(a, original, removals, expected)
             return
         raise ValueError(f"unhandled action {kind!r}")
 
     @staticmethod
-    def _remove_source(removals, a) -> None:
+    def _remove_source(removals, a, original, expected) -> None:
+        """Queue a removal, keyed by the text the plan expected to find there.
+
+        Recording the expected text is what makes a stale or retried plan
+        safe: at rebuild time the index is only honoured if it still holds
+        that exact entry, so re-applying a plan can never delete an unrelated
+        entry that shifted into the slot.
+        """
         idx = a.get("index")
         if idx is None:
             return
+        # Reject bools/floats: ``True`` would silently become index 1.
+        if isinstance(idx, bool) or not isinstance(idx, int):
+            raise ValueError(f"index must be an int, got {idx!r}")
         target = a.get("target", "memory")
-        removals.setdefault(target, set()).add(int(idx))
+        removals.setdefault(target, set()).add(idx)
+        # Prefer the text the PLAN states it expected at this index — that is
+        # the independent record the staleness check compares against. But a
+        # ROUTING action's ``text`` is the payload destined for the new
+        # location (a paraphrase, possibly a truncated inventory copy), not an
+        # assertion about the source. Only a destructive action
+        # (evict-to-quarantine) makes such an assertion, so only that one
+        # gets the staleness check; every other action falls back to the live
+        # value, which keeps the removal an exact no-op against a real entry.
+        destructive = a.get("action") == "evict-to-quarantine"
+        stated = a.get("text") if destructive else None
+        entries = original.get(target) or []
+        if not isinstance(stated, str) or not stated:
+            # Out of range is not a crash: report it and do not queue a
+            # removal that the rebuild loop cannot resolve.
+            if not (0 <= idx < len(entries)):
+                raise IndexError(
+                    f"source index {idx} out of range for target {target!r} "
+                    f"({len(entries)} entries)"
+                )
+            stated = entries[idx]
+        if stated is not None:
+            expected[(target, idx)] = stated
 
     # -- action implementations ------------------------------------------
 
-    def _do_consolidate(self, a, removals, appends) -> None:
+    @staticmethod
+    def _source_text(a: Dict[str, Any], original: Dict[str, List[str]]) -> str:
+        """The REAL entry text for a routing action.
+
+        The inventory caps entry text for the model payload (``inventory.py``),
+        so ``a['text']`` is a truncated paraphrase. Persisting that and then
+        deleting the source is silent knowledge loss, so when the action names
+        a readable source index we route the true full text instead.
+        """
+        idx = a.get("index")
+        target = a.get("target", "memory")
+        if isinstance(idx, int) and not isinstance(idx, bool):
+            entries = original.get(target) or []
+            if 0 <= idx < len(entries):
+                return entries[idx]
+        return a.get("text") or a.get("body") or ""
+
+    def _do_consolidate(self, a, original, removals, appends, expected) -> None:
         target = a.get("target", "memory")
         idxs = [int(i) for i in (a.get("entries") or [])]
         merged = (a.get("text") or "").strip()
-        if len(idxs) < 2 or not merged:
-            raise ValueError("consolidate requires entries[] (>=2) and text")
-        removals[target].update(i for i in idxs)
+        if len(set(idxs)) < 2 or not merged:
+            raise ValueError(
+                "consolidate requires >=2 DISTINCT entries[] and text "
+                f"(got entries={idxs})"
+            )
+        entries = original.get(target) or []
+        # Validate every index before mutating anything, so a hallucinated
+        # index cannot append merged text while removing nothing.
+        for i in idxs:
+            if not (0 <= i < len(entries)):
+                raise ValueError(
+                    f"consolidate index {i} out of range "
+                    f"(target '{target}' has {len(entries)} entries); nothing merged"
+                )
+        # Refuse to merge on a TRUNCATED base: the action's text may be the
+        # inventory's 160-char cap, and writing that back as the merged entry
+        # would silently discard the rest with no quarantine record.
+        capped = any(
+            (e.get("chars") or 0) > len(e.get("text") or "")
+            for e in (a.get("_source_entries") or [])
+        )
+        if capped and len(merged) < max(
+            (e.get("chars") or 0) for e in a["_source_entries"]
+        ):
+            raise ValueError(
+                "consolidate text is a truncated inventory copy; refusing to "
+                "merge (would silently discard the rest of the entries)"
+            )
+        removals[target].update(idxs)
+        for i in idxs:
+            expected[(target, i)] = entries[i]
         appends[target].append(merged)
         self._note(f"consolidated {len(idxs)} entries into {len(merged)} chars [{target}]")
         self._ledger("consolidate", f"{target}#consolidated", merged[:60])
 
-    def _do_skill(self, a) -> None:
+    def _do_skill(self, a, original) -> None:
         name = a.get("skill_name") or a.get("name") or "routed-skill"
-        body = (a.get("text") or a.get("body") or "").strip()
+        body = self._source_text(a, original).strip()
         if not body:
             raise ValueError("route-to-skill requires text")
         category = a.get("category") or "tools"
         target = self.cfg.skills_root / _safe(category) / _safe(name) / "SKILL.md"
-        description = body.splitlines()[0][:80]
+        # Never silently clobber a hand-written skill; a collision must be an
+        # explicit, reported refusal rather than an overwrite.
+        if target.exists() and not ledger.already_routed(self.cfg, str(target)):
+            raise ValueError(
+                f"skill '{target}' already exists and was not written by "
+                f"triage; refusing to overwrite — pick a different skill_name"
+            )
+        # YAML-quote the description: an unquoted body-derived line containing
+        # ": " or starting with "#" produced invalid frontmatter, which made
+        # the skill invisible to inventory_skills and unreachable forever.
+        description = _yaml_quote((body.splitlines() or [""])[0][:80])
         content = SKILL_FRONTMATTER.format(
-            name=_safe(name), description=description, provenance=self._provenance
+            name=_safe(name), description=description,
+            provenance=_yaml_scalar(self._provenance),
         ) + body + "\n"
         _write_atomic(target, content)
         self._note(f"routed to skill '{name}' ({target})")
@@ -368,16 +703,29 @@ class Executor:
         text = (a.get("text") or "").strip()
         if not text:
             raise ValueError("route-to-profile requires text")
+        # Routing INTO the profile can only make an over-budget store worse.
+        # Demote to provider rather than deepen the problem.
+        if memory_store.char_count(
+            memory_store.read_entries_strict(memory_store.TARGET_USER)
+        ) >= memory_store.char_limit(memory_store.TARGET_USER):
+            self.errors.append(
+                "route-to-profile skipped: target 'user' is already at/over its "
+                "char limit; routing into it would worsen the pressure"
+            )
+            raise ValueError("route-to-profile refused: user store at/over limit")
         appends["user"].append(text)
         self._note(f"routed to profile ({len(text)} chars)")
         self._ledger("user", "USER.md", text[:200])
 
-    def _do_provider(self, a) -> bool:
+    def _do_provider(self, a, original=None) -> bool:
         """Best-effort provider write. Returns True only if the gateway write
         succeeded. On failure the caller must KEEP the source entry in the
         working store (no silent data loss) — it is only recoverable from the
         plan file otherwise."""
-        text = (a.get("text") or "").strip()
+        text = (
+            self._source_text(a, original) if original is not None
+            else (a.get("text") or "")
+        ).strip()
         if not text:
             raise ValueError("route-to-provider requires text")
         notice = _dispatch_to_provider(self.cfg, text)
@@ -385,13 +733,16 @@ class Executor:
             self._note_pending(f"route-to-provider: {notice}")
             return False
         self._note(f"routed to provider (gateway {notice})")
-        self._ledger("provider", "provider/scene", text[:200])
+        # Record the FULL routed text, not a 200-char summary: the source
+        # entry is being removed, so the ledger is the only remaining record
+        # of what was written. A truncated summary here is silent loss.
+        self._ledger("provider", "provider/scene", text)
         return True
 
-    def _do_script(self, a) -> None:
+    def _do_script(self, a, original) -> None:
         script_name = a.get("script_name") or "routed-script"
         ext = (a.get("script_ext") or "py").lstrip(".").lower()
-        body = (a.get("text") or "").strip()
+        body = self._source_text(a, original).strip()
         if not body:
             raise ValueError("route-to-script requires text")
         if ext not in ("py", "sh", "bash"):
@@ -409,19 +760,26 @@ class Executor:
                 self._note_pending(f"cron for '{script_name}': {result}")
         self._ledger("script", str(script_path), body[:200])
 
-    def _do_evict(self, a, original, removals) -> None:
+    def _do_evict(self, a, original, removals, expected) -> None:
         target = a.get("target", "memory")
         index = a.get("index")
         if index is None:
             raise ValueError("evict-to-quarantine requires an index")
-        idx = int(index)
-        entries = original[target]
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise ValueError(f"index must be an int, got {index!r}")
+        idx = index
+        entries = original.get(target) or []
         if idx < 0 or idx >= len(entries):
             raise IndexError(f"source index {idx} out of range for target {target!r}")
         victim_text = entries[idx]
-        quarantine.evict(
-            self.cfg, target=target, text=victim_text,
-            reason=a.get("reason", ""), run_id=self._run_id,
-        )
+        # Do NOT write to quarantine here: the identity guard and the safety
+        # floor run later and may revoke this removal. The record is buffered
+        # and flushed by execute_plan only for removals that survive.
         removals[target].add(idx)
+        # Only claim an expectation when the PLAN stated one. Overwriting with
+        # the live value here would make the staleness check in the rebuild
+        # loop compare a value against itself, and it could never fire.
+        stated = a.get("text")
+        if isinstance(stated, str) and stated:
+            expected[(target, idx)] = stated
         self._note(f"quarantined {len(victim_text)} chars [{target}]")

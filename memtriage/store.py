@@ -130,8 +130,27 @@ def file_lock(path: Path) -> Iterator[None]:
         fd.close()
 
 
+class StoreUnreadable(RuntimeError):
+    """The store file exists but could not be read.
+
+    CRITICAL DISTINCTION: an absent or genuinely empty file yields ``[]``.
+    A file that exists and is non-empty but cannot be read (EACCES, EBUSY,
+    a concurrent ``os.replace``, truncation, undecodable bytes) must NOT be
+    reported as empty — doing so made ``execute_plan`` rebuild the store from
+    an empty snapshot and overwrite the user's real profile with a single
+    entry. Callers that rebuild a store from a snapshot must use
+    :func:`read_entries_strict` so this case aborts instead of destroying data.
+    """
+
+
 def read_entries(target: str) -> List[str]:
-    """Read entries for a target; empty file or missing file -> []."""
+    """Read entries for a target; missing or genuinely empty file -> [].
+
+    Swallows read errors and returns ``[]`` — the historical behaviour, kept
+    for read-only callers (``usage``, ``replace_entry``, ``append_entry``)
+    where a permissive result is harmless. Never use this to build a
+    rewrite snapshot; use :func:`read_entries_strict`.
+    """
     path = path_for(target)
     if not path.exists():
         return []
@@ -139,6 +158,36 @@ def read_entries(target: str) -> List[str]:
         return parse_entries(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError):
         return []
+
+
+def read_entries_strict(target: str) -> List[str]:
+    """Like :func:`read_entries` but raises instead of faking an empty store.
+
+    Returns ``[]`` ONLY when the file is absent or truly empty. An existing,
+    non-empty file that fails to read raises :class:`StoreUnreadable` so the
+    caller aborts the whole operation rather than writing back a store built
+    from a phantom empty snapshot.
+    """
+    path = path_for(target)
+    if not path.exists():
+        return []
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise StoreUnreadable(
+            f"{path} exists but could not be read ({type(exc).__name__}: {exc}); "
+            f"refusing to treat it as an empty store"
+        ) from exc
+    entries = parse_entries(raw)
+    if not entries and raw.strip():
+        # Non-empty bytes that parse to zero entries means the delimiter
+        # format changed underneath us (or the file is corrupt). That is not
+        # the same as an empty store and must not be silently accepted.
+        raise StoreUnreadable(
+            f"{path} has {len(raw)} bytes but parses to 0 entries "
+            f"(unrecognised format?); refusing to treat it as an empty store"
+        )
+    return entries
 
 
 def write_entries(target: str, entries: List[str]) -> None:

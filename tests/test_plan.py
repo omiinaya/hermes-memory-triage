@@ -1,5 +1,7 @@
 """Tests for memtriage.plan: extraction, validation, rendering."""
 
+import json
+
 import pytest
 
 from memtriage import plan
@@ -90,13 +92,35 @@ def test_parse_plan_skips_empty_arrays():
     assert out[0]["action"] == "evict-to-quarantine"
 
 
-def test_parse_plan_takes_last_valid_array():
-    raw = (
-        'Example: [{"action": "keep", "target": "memory", "index": 0, "reason": "example"}]\n'
-        'Final committed plan: [{"action": "route-to-skill", "skill_name": "final", "text": "t", "reason": "real"}]'
+def test_parse_plan_prefers_the_real_plan_over_a_trailing_recap():
+    """A recap/summary array after the real plan must NOT replace it.
+
+    Regression: parse_plan returned valid[-1], so a model that emitted its
+    plan and then restated it as an all-keep recap silently voided every
+    routing decision — triage reported success and freed nothing. Equal-length
+    ambiguity is now an explicit refusal, and a longer real plan wins.
+    """
+    real = [
+        {"action": "evict-to-quarantine", "target": "user", "index": 1,
+         "reason": "stale"},
+        {"action": "keep", "target": "user", "index": 0, "reason": "identity"},
+    ]
+    recap = [{"action": "keep", "target": "memory", "index": 0, "reason": "recap"}]
+    out = plan.parse_plan(
+        "My plan: " + json.dumps(real) + "\nRecap: " + json.dumps(recap)
     )
-    out = plan.parse_plan(raw)
-    assert out[0]["skill_name"] == "final"
+    assert len(out) == 2
+    assert out[0]["action"] == "evict-to-quarantine"
+    # The single-action recap must not have won.
+    assert all(a["action"] != "keep" or a.get("reason") != "recap" for a in out)
+
+
+def test_parse_plan_refuses_genuinely_ambiguous_reply():
+    """Two equally-sized, DIFFERENT plans is not a coin flip — refuse."""
+    a = [{"action": "keep", "target": "memory", "index": 0, "reason": "alpha"}]
+    b = [{"action": "keep", "target": "memory", "index": 0, "reason": "beta"}]
+    with pytest.raises(PlanValidationError):
+        plan.parse_plan("first: " + json.dumps(a) + "second: " + json.dumps(b))
 
 
 def test_validate_rejects_routing_from_user_target():
