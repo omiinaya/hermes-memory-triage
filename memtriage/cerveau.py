@@ -86,10 +86,13 @@ Routing taxonomy — choose ONE action per item:
               {{"action": ..., "text": <clause>, ...}} — no "index" needed.
   Example shape (the angle-bracket text below is a TEMPLATE — never copy it
   into "text"/"keep"; always substitute the real clauses you read out of the
-  store, verbatim):
+  store, verbatim). "example-skill-name" is a placeholder too, NOT a skill you
+  may route to — use a name from "existing_skill_names", or a genuinely new
+  one you are inventing:
     {{"action": "split", "target": "user", "index": 0,
       "keep": "<the identity core, verbatim>",
-      "routes": [{{"action": "route-to-skill", "skill_name": "team-doctrine",
+      "routes": [{{"action": "route-to-skill",
+                   "skill_name": "example-skill-name",
                    "text": "<the deploy/repo clauses>"}}]}}
   Splitting is the ONLY way to relieve a store whose pressure is one giant
   identity entry. If you see such an entry, split it — do not "keep" it and

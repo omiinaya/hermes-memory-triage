@@ -945,3 +945,87 @@ def test_appending_takes_a_recoverable_snapshot(tmp_path):
     snaps = list((tmp_path / "data").rglob("*snap-check*"))
     assert snaps, "no pre-write snapshot was taken for the append"
     assert "ORIGINAL" in snaps[0].read_text(encoding="utf-8")
+
+
+# --- defect 17: the prompt's example was copyable verbatim -----------------
+#
+# Two echoes got through:
+#  1. The example's skill_name was "team-doctrine" -- a REAL-looking name, and
+#     a live run had already created that junk skill from it. Changed to
+#     "example-skill-name" and the prompt now says it is a placeholder too.
+#  2. _looks_like_placeholder only matched the ^<...>$ form, so a bare-word
+#     placeholder name sailed through validate() and would have been written
+#     as a real skill directory.
+
+
+def test_the_prompt_example_never_names_a_real_looking_skill():
+    from memtriage.cerveau import PROMPT_TEMPLATE
+
+    # "team-doctrine" is not a placeholder-looking string, which is exactly why
+    # the model copied it and created a junk skill from it.
+    assert "team-doctrine" not in PROMPT_TEMPLATE
+    assert "example-skill-name" in PROMPT_TEMPLATE
+    assert "NOT a skill you" in PROMPT_TEMPLATE
+
+
+@pytest.mark.parametrize("name", [
+    "example-skill-name", "your-skill-name", "example", "EXAMPLE",
+    "sample-name", "foo", "todo", "<name>",
+])
+def test_placeholder_skill_names_are_refused(name):
+    from memtriage.plan import validate, PlanValidationError
+
+    with pytest.raises(PlanValidationError, match="PLACEHOLDER"):
+        validate([{"action": "route-to-skill", "skill_name": name,
+                   "text": "real content"}])
+
+
+@pytest.mark.parametrize("name", [
+    "oem-ui-design-system", "oem-cdn-design", "team-doctrine", "gantree",
+    # Names that merely CONTAIN a placeholder word must survive: the pattern is
+    # anchored to the whole value.
+    "example-workflow", "sample-data-audit", "foo-bar-skill",
+])
+def test_real_skill_names_survive_the_placeholder_guard(name):
+    from memtriage.plan import validate
+
+    out = validate([{"action": "route-to-skill", "skill_name": name,
+                     "text": "real content"}])
+    assert out[0]["skill_name"] == name
+
+
+def test_a_placeholder_name_inside_routes_is_refused():
+    from memtriage.plan import validate, PlanValidationError
+
+    with pytest.raises(PlanValidationError, match="PLACEHOLDER"):
+        validate([{
+            "action": "split", "target": "user", "index": 0,
+            "keep": "the identity core",
+            "routes": [{"action": "route-to-skill",
+                        "skill_name": "example-skill-name",
+                        "text": "real clause"}],
+        }])
+
+
+def test_two_identical_plans_are_not_ambiguous():
+    """A reply that restates the SAME plan verbatim is not a conflict.
+
+    Length-preference cannot break a tie between two equal-length arrays, so
+    without dedup the plugin would refuse a plan the model had actually
+    answered clearly.
+    """
+    from memtriage.plan import parse_plan
+
+    plan = [{"action": "keep", "index": 0, "text": "t", "reason": "r"}]
+    reply = json.dumps(plan) + "\nand again:\n" + json.dumps(plan)
+    out = parse_plan(reply)
+    assert len(out) == 1
+
+
+def test_two_different_equal_length_plans_still_refuse():
+    from memtriage.plan import parse_plan, PlanValidationError
+
+    a = [{"action": "keep", "index": 0, "text": "one", "reason": "r"}]
+    b = [{"action": "keep", "index": 0, "text": "two", "reason": "r"}]
+    with pytest.raises(PlanValidationError, match="Ambiguous"):
+        parse_plan(json.dumps(a) + "\n" + json.dumps(b))

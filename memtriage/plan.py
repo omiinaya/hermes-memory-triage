@@ -196,9 +196,20 @@ def parse_plan(raw: str) -> List[Dict[str, Any]]:
         by_len = sorted(valid, key=len, reverse=True)
         if len(by_len[0]) > len(by_len[1]):
             return by_len[0]
+        # Equal length, so length cannot break the tie. Deduplicate first: a
+        # reply often restates the SAME plan verbatim, and those are not a
+        # conflict.
+        seen, distinct = set(), []
+        for cand in by_len:
+            key = json.dumps(cand, sort_keys=True)
+            if key not in seen:
+                seen.add(key)
+                distinct.append(cand)
+        if len(distinct) == 1:
+            return distinct[0]
         # Genuinely ambiguous (equal length, different content) — do not pick.
         raise PlanValidationError(
-            f"Ambiguous Cerve reply: {len(valid)} distinct action arrays of "
+            f"Ambiguous Cerveau reply: {len(distinct)} distinct action arrays of "
             f"equal length; refusing to guess. The model emitted a plan and "
             f"then restated it differently."
         )
@@ -329,6 +340,17 @@ def validate(actions: List[Any]) -> List[Dict[str, Any]]:
 # placeholder is a perfectly well-formed string.
 _PLACEHOLDER_RE = re.compile(r"^<[^<>\n]{1,120}>$")
 
+# Bare-word placeholders. The angle-bracket form above is the common case,
+# but the prompt's example also names skills "example-skill-name" / "your-skill
+# -name", and those pass ^<...>$ happily. Matched only against whole
+# skill_name VALUES, so a real skill that merely contains the word "example"
+# ("example-workflow") is unaffected: the anchors require the whole value.
+_PLACEHOLDER_NAME_RE = re.compile(
+    r"^(?:your[-_ ]?|example|sample|dummy|placeholder|todo|tbd|xxx+|foo|bar)"
+    r"[-_ ]?(?:skill[-_ ]?)?(?:name)?$",
+    re.IGNORECASE,
+)
+
 
 def _looks_like_placeholder(text: str) -> bool:
     """True for a whole-string angle-bracket placeholder like ``<the ...>``.
@@ -367,6 +389,17 @@ def _reject_placeholder_content(a: Dict[str, Any], n: int, kind: str) -> None:
                 f"Action #{n} ({kind}) carries a PROMPT PLACEHOLDER in {f!r} "
                 f"({str(a.get(f))[:60]!r}) rather than real content — Cerveau "
                 f"echoed the example from the prompt. Refusing the plan."
+            )
+    # A placeholder skill_name is the same failure one field over: the model
+    # copied the example's name instead of choosing one. Length-preference
+    # alone does not catch it — a 1-action echo loses to a 14-action plan, but
+    # a model that emits ONLY the echo would otherwise have it applied.
+    for holder in (a, *(r for r in (a.get("routes") or []) if isinstance(r, dict))):
+        nm = str(holder.get("skill_name") or "").strip()
+        if nm and (_looks_like_placeholder(nm) or _PLACEHOLDER_NAME_RE.match(nm)):
+            raise PlanValidationError(
+                f"Action #{n} ({kind}) routes to skill_name {nm!r}, which is a "
+                f"PROMPT PLACEHOLDER, not a real skill name. Refusing the plan."
             )
 
 
