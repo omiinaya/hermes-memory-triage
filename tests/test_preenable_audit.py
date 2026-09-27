@@ -807,3 +807,141 @@ def test_the_second_real_live_reply_parses_to_the_cerveau_plan():
     assert all(a.get("_source", "cerveau") == "cerveau" for a in plan)
     kinds = {a["action"] for a in plan}
     assert kinds != {"keep"}, "fell back to the all-keep no-op"
+
+
+# --- defect 16: Cerveau could not see existing skills, so it duplicated them --
+#
+# The prompt truncated the skills list to the first 30 (and under budget
+# pressure, the first 5) IN ALPHABETICAL ORDER. With 324 installed skills,
+# everything past ~"c" was invisible -- including the user's own
+# oem-ui-design-system and oem-cdn-design. Cerveau therefore invented
+# "oem-ui-design-system" as a NEW name, because it had never been told the name
+# existed, and would have forked a 39KB curated skill into a duplicate.
+
+
+def test_truncation_keeps_every_skill_name(tmp_path):
+    from memtriage.cerveau import _truncate_payload
+
+    skills = [{"name": f"skill-{i:03d}", "description": "x" * 400, "path": f"/p/{i}"}
+              for i in range(324)]
+    out = _truncate_payload({"skills": skills, "memory": [], "user": []})
+
+    names = [s.get("name") for s in out["skills"]]
+    # Every name must survive truncation -- a name is cheap and is the only
+    # thing the collision rule needs.
+    assert len(names) == 324, f"expected all 324 names, got {len(names)}"
+    assert "skill-323" in names, "the alphabetically-last skill was dropped"
+    # But the expensive descriptions are still capped.
+    blanked = [s for s in out["skills"] if not s.get("description")]
+    assert len(blanked) > 0, "descriptions were not trimmed at all"
+
+
+def test_truncation_keeps_names_even_under_a_tiny_budget():
+    from memtriage.cerveau import _truncate_payload
+
+    skills = [{"name": f"s{i}", "description": "y" * 500, "path": ""} for i in range(50)]
+    out = _truncate_payload({"skills": skills, "memory": [], "user": []},
+                            max_chars=500)
+    names = [s.get("name") for s in out["skills"]]
+    assert len(names) == 50, f"names were truncated under budget pressure: {len(names)}"
+    assert all(s.get("description") == "" for s in out["skills"])
+
+
+def test_the_prompt_tells_cerveau_to_check_existing_skill_names():
+    from memtriage.cerveau import PROMPT_TEMPLATE
+
+    # The rule must name the inventory field AND tell the model what actually
+    # happens on a collision (it appends), so the model is never told a
+    # behaviour the executor does not have.
+    assert "existing_skill_names" in PROMPT_TEMPLATE
+    assert "CHECK" in PROMPT_TEMPLATE and "INVENTORY" in PROMPT_TEMPLATE
+    assert "APPENDS" in PROMPT_TEMPLATE
+    assert "REFUSES to overwrite" not in PROMPT_TEMPLATE, (
+        "the prompt promises a refusal the executor no longer performs"
+    )
+    assert "append_to_existing" not in PROMPT_TEMPLATE, (
+        "the prompt advertises a flag the executor does not read"
+    )
+
+
+def test_routing_to_an_existing_skill_name_appends_instead_of_duplicating(tmp_path):
+    """A name that already exists in ANY category must extend that skill."""
+    from memtriage.config import Config
+    from memtriage.executor import Executor
+
+    home = tmp_path / "hermes"
+    existing = home / "skills" / "creative" / "oem-ui-design-system"
+    existing.mkdir(parents=True)
+    skill_md = existing / "SKILL.md"
+    skill_md.write_text(
+        "---\nname: oem-ui-design-system\ndescription: house style\n"
+        "metadata:\n  hermes:\n    tags: [design-system]\n---\n\n"
+        "## Curated doctrine\n\nThe light ink is #6d6d6d.\n",
+        encoding="utf-8",
+    )
+    before = skill_md.read_text(encoding="utf-8")
+
+    cfg = Config()
+    cfg.data_dir = tmp_path / "data"
+    ex = Executor(cfg)
+    ex._run_id = "r1"
+    ex._provenance = "test"
+
+    ex._do_skill({"skill_name": "oem-ui-design-system",
+                  "text": "NEW FACT: 175 tests, private repo."}, {})
+
+    after = skill_md.read_text(encoding="utf-8")
+    # The curated content and the frontmatter must both survive.
+    assert "The light ink is #6d6d6d." in after
+    assert "tags: [design-system]" in after
+    assert "NEW FACT: 175 tests" in after
+    # And no duplicate may exist in the default category.
+    dup = home / "skills" / "tools" / "oem-ui-design-system"
+    assert not dup.exists(), f"created a duplicate skill at {dup}"
+
+
+def test_appending_the_same_content_twice_is_a_no_op(tmp_path):
+    from memtriage.config import Config
+    from memtriage.executor import Executor
+
+    home = tmp_path / "hermes"
+    d = home / "skills" / "tools" / "dup-check"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text("---\nname: dup-check\n---\n\nbody\n", encoding="utf-8")
+
+    cfg = Config()
+    cfg.data_dir = tmp_path / "data"
+    ex = Executor(cfg)
+    ex._run_id = "r1"
+    ex._provenance = "test"
+
+    ex._do_skill({"skill_name": "dup-check", "text": "UNIQUE MARKER LINE"}, {})
+    once = (d / "SKILL.md").read_text(encoding="utf-8")
+    ex2 = Executor(cfg)
+    ex2._run_id = "r2"
+    ex2._provenance = "test"
+    ex2._do_skill({"skill_name": "dup-check", "text": "UNIQUE MARKER LINE"}, {})
+    twice = (d / "SKILL.md").read_text(encoding="utf-8")
+    assert once == twice, "the same content was appended twice"
+    assert once.count("UNIQUE MARKER LINE") == 1
+
+
+def test_appending_takes_a_recoverable_snapshot(tmp_path):
+    from memtriage.config import Config
+    from memtriage.executor import Executor
+
+    home = tmp_path / "hermes"
+    d = home / "skills" / "tools" / "snap-check"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text("---\nname: snap-check\n---\n\nORIGINAL\n", encoding="utf-8")
+
+    cfg = Config()
+    cfg.data_dir = tmp_path / "data"
+    ex = Executor(cfg)
+    ex._run_id = "r1"
+    ex._provenance = "test"
+    ex._do_skill({"skill_name": "snap-check", "text": "APPENDED"}, {})
+
+    snaps = list((tmp_path / "data").rglob("*snap-check*"))
+    assert snaps, "no pre-write snapshot was taken for the append"
+    assert "ORIGINAL" in snaps[0].read_text(encoding="utf-8")

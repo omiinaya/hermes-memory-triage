@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import re
 import subprocess
 import tempfile
@@ -929,12 +930,86 @@ class Executor:
         )
         self._ledger("consolidate", f"{target}#consolidated", merged[:60])
 
+    def _find_existing_skill(self, name: str) -> Optional[Path]:
+        """Locate an installed SKILL.md by directory name, any category.
+
+        Category is irrelevant to the collision question: a skill named
+        ``oem-ui-design-system`` living under ``creative/`` is still that skill,
+        and writing ``tools/oem-ui-design-system/`` beside it forks the user's
+        doctrine into an unregistered duplicate. Returns None when absent.
+        """
+        safe = _safe(name)
+        if not safe:
+            return None
+        root = self.cfg.skills_root
+        if not root.exists():
+            return None
+        # Direct child first, then any category, then any depth. A skill that
+        # lives at any depth is still the same skill by name.
+        direct = root / safe / "SKILL.md"
+        if direct.exists():
+            return direct
+        for depth in ("*", "*/*"):
+            for match in root.glob(f"{depth}/{safe}/SKILL.md"):
+                if match.exists():
+                    return match
+        hits = list(root.rglob(f"{safe}/SKILL.md"))
+        return hits[0] if hits else None
+
+    def _extend_skill(self, path: Path, body: str, a: Dict[str, Any]) -> None:
+        """Append routed content to an EXISTING skill instead of duplicating it.
+
+        Frontmatter is preserved verbatim (parsing and re-emitting YAML would
+        drop keys the plugin does not model, and ``metadata.hermes`` carries the
+        tags that make a skill discoverable). A pre-write snapshot is taken so
+        an append is as recoverable as a create. Idempotent: content already
+        present is not appended twice.
+        """
+        existing = path.read_text(encoding="utf-8", errors="replace")
+        marker = body.strip()
+        if marker and marker in existing:
+            self._note(f"skill '{path.parent.name}' already contains this content; nothing to append")
+            return
+        snap = None
+        try:
+            # A plain file copy, NOT snapshots.take(): that resolves its source
+            # through store.path_for(target), which only knows the two memory
+            # stores. A skill is an arbitrary path, so copy it directly.
+            snap_dir = snapshots.snapshots_dir(self.cfg.data_dir) / "skills"
+            snap_dir.mkdir(parents=True, exist_ok=True)
+            dest = snap_dir / f"{path.parent.name}__{self._run_id}__{path.name}"
+            tmp = dest.with_name(dest.name + f".tmp{os.getpid()}")
+            shutil.copy2(path, tmp)
+            os.replace(tmp, dest)
+            snap = dest
+        except (OSError, ValueError) as exc:  # noqa: BLE001
+            # A failed snapshot does not block the write: the write is still
+            # atomic, and refusing here would turn a full disk into a total
+            # routing outage. Report it so the append is not silently
+            # unrecoverable.
+            self._note(f"pre-write snapshot FAILED for {path}: {exc}")
+        addition = f"\n\n## Routed by memtriage ({self._provenance})\n\n{marker}\n"
+        _write_atomic(path, existing.rstrip("\n") + addition)
+        self._note(f"appended to existing skill '{path.parent.name}' ({path})")
+        if snap:
+            self._note(f"  pre-write snapshot: {snap}")
+        self._ledger("skill-append", str(path), body[:200])
+
     def _do_skill(self, a, original) -> None:
         name = a.get("skill_name") or a.get("name") or "routed-skill"
         body = self._source_text(a, original).strip()
         if not body:
             raise ValueError("route-to-skill requires text")
         category = a.get("category") or "tools"
+        # DANGER 2026-09-27: Cerveau cannot see most installed skill names (the
+        # prompt truncated the skills list alphabetically), so it invented names
+        # that collided with real curated skills. When the named skill already
+        # exists ANYWHERE under skills_root — not just in the default category —
+        # extend it instead of writing a duplicate. This is the enforcement
+        # point; the prompt rule is only advice.
+        existing = self._find_existing_skill(name)
+        if existing is not None:
+            return self._extend_skill(existing, body, a)
         target = self.cfg.skills_root / _safe(category) / _safe(name) / "SKILL.md"
         # Never silently clobber a hand-written skill; a collision must be an
         # explicit, reported refusal rather than an overwrite.

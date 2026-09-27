@@ -48,6 +48,14 @@ Routing taxonomy — choose ONE action per item:
 - "route-to-skill": a reusable procedure or workflow that will be needed
   again -> becomes a SKILL.md. Requires "skill_name" and "text" (the SKILL.md
   body, without frontmatter — the plugin adds it).
+  ⚠ CHECK "existing_skill_names" IN THE INVENTORY FIRST. Every installed
+  skill name is listed there; a colliding name does NOT waste the action --
+  the plugin locates the existing skill in ANY category and APPENDS a new
+  section to it, taking a recoverable snapshot first. So when a skill already
+  covers this knowledge, propose that same "skill_name" and put only the NEW
+  information in "text" (if it is genuinely all new information). Never
+  invent a near-duplicate name such as "oem-ui-design-system" when that
+  exact skill already exists.
 - "route-to-profile": an identity/role/preference fact about the user ->
   target "user".
 - "route-to-provider": rich episodic knowledge or scene context that should
@@ -137,6 +145,9 @@ not appear in more than one action.
 
 
 DEFAULT_MAX_PAYLOAD_CHARS = int(os.environ.get("CERVEAU_MAX_PAYLOAD", "6000"))
+# How many skills keep a DESCRIPTION. Names are never dropped (see
+# _truncate_payload); only the expensive description text is capped.
+MAX_SKILL_DESCRIPTIONS = 40
 
 # Substrings that mark an entry as NEVER-evict (doctrine: identity, security,
 # environment-critical). Matched on the capped entry text — if ANY matches, the
@@ -188,10 +199,26 @@ def _truncate_payload(payload: Dict[str, Any], max_chars: int = DEFAULT_MAX_PAYL
     """
     out = dict(payload)
     # Memory entries: keep full (capped text), they are the decision surface.
-    if "skills" in out and len(out["skills"]) > 30:
-        out["skills"] = out["skills"][:30] + [
-            {"name": "...", "description": f"(+{len(out['skills']) - 30} more skills omitted)", "path": ""}
-        ]
+    #
+    # DANGER 2026-09-27: skills were truncated to the first 30 (and under
+    # pressure, the first 5) in LIST ORDER, which is alphabetical. With 324
+    # installed skills that made everything past ~"c" invisible — including the
+    # user's own oem-ui-design-system and oem-cdn-design. Cerveau then invented
+    # "oem-ui-design-system" as a NEW skill_name, colliding with a real 39KB
+    # curated skill, because it had never been told that name existed.
+    #
+    # A collision check is impossible if the model cannot see the names. So:
+    # NAMES are cheap (a name is ~20 chars) and are what the collision rule
+    # needs, so ALL names are always kept. Only the descriptions — the expensive
+    # part — get capped. A collision guard in the prompt then does its job.
+    if "skills" in out and out["skills"]:
+        all_names = [s.get("name", "") for s in out["skills"]]
+        kept = out["skills"][:MAX_SKILL_DESCRIPTIONS]
+        for s in out["skills"][MAX_SKILL_DESCRIPTIONS:]:
+            kept.append({"name": s.get("name", ""), "description": "", "path": ""})
+        out["skills"] = kept
+        if len(all_names) > MAX_SKILL_DESCRIPTIONS:
+            out["_all_skill_names"] = all_names
     if "scripts" in out and len(out["scripts"]) > 40:
         out["scripts"] = out["scripts"][:40] + [
             {"path": "...", "name": f"...(+{len(out['scripts']) - 40} more scripts omitted)"}
@@ -200,11 +227,12 @@ def _truncate_payload(payload: Dict[str, Any], max_chars: int = DEFAULT_MAX_PAYL
     # scripts/skills lists, never mid-value. (Truncating raw JSON mid-token
     # produces invalid JSON that Cerveau can't parse.)
     text = json.dumps(out, ensure_ascii=False)
-    if len(text) > max_chars and "skills" in out and len(out["skills"]) > 5:
-        # Aggressive fallback: trim skills list further.
-        out["skills"] = out["skills"][:5] + [
-            {"name": "...", "description": f"(+{len(out['skills']) - 5} more omitted)", "path": ""}
-        ]
+    if len(text) > max_chars and "skills" in out and len(out["skills"]) > MAX_SKILL_DESCRIPTIONS:
+        # Aggressive fallback: cut DESCRIPTION text only. Dropping names here is
+        # what hid the user's own skills from Cerveau on 2026-09-27, so the
+        # name list is never truncated at any budget.
+        out["skills"] = [{"name": s.get("name", ""), "description": "", "path": ""}
+                         for s in out["skills"]]
     if len(text) > max_chars and "scripts" in out and len(out["scripts"]) > 10:
         out["scripts"] = out["scripts"][:10] + [
             {"path": "...", "name": "...(+more omitted)"}
