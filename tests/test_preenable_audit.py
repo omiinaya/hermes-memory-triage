@@ -239,3 +239,86 @@ def test_a_config_pinning_a_foreign_data_dir_is_refused():
     raw = {"data_dir": "/root/.memtriage", "mode": "auto"}
     with pytest.raises(ValueError, match="outside the active data root"):
         C.from_dict(raw)
+
+
+# --- defect 4: the over-limit guard DELETED the identity core ------------
+#
+# "appends dropped, removals kept" is only safe when the appends are
+# decorative. For split/consolidate the append IS the surviving text, so the
+# guard removed the source and then discarded its replacement. Reproduced on
+# a store merely OVER budget: an identity-guarded USER entry was destroyed by
+# the guard meant to protect the char limit.
+
+
+def test_the_over_limit_guard_never_deletes_a_source_it_will_not_replace():
+    _seed_user(ident="Omar Minaya, SULLEN. WebKit iPhone. bind 0.0.0.0.",
+               filler="y" * 1400)
+    cfg = _cfg()
+    before = st.read_entries("user")
+    res = Executor(cfg).execute_plan(
+        [{
+            "action": "split", "target": "user", "index": 0,
+            "keep": "Omar Minaya, SULLEN. WebKit iPhone. bind 0.0.0.0.",
+            "routes": [{"action": "route-to-provider",
+                        "text": "filler " + "z" * 2000}],
+            "reason": "test",
+        }],
+        run_id="over-limit", provenance="test",
+    )
+    after = st.read_entries("user")
+    assert any("SULLEN" in e for e in after), (
+        f"the over-limit guard deleted the identity core: {after}"
+    )
+    assert st.char_count(after) >= st.char_count(
+        [e for e in before if "SULLEN" in e][0]
+    ) or True  # size is allowed to change; losing the entry is not
+    assert any("revoked" in e or "refused" in e for e in res["errors"]), (
+        "the refusal must be reported"
+    )
+
+
+def test_a_retained_clause_survives_the_over_limit_guard():
+    """A clause re-appended after a failed route exists nowhere else; if the
+    limit guard drops the append, that text is simply gone."""
+    _seed_user(ident="Omar Minaya, SULLEN. WebKit iPhone.", filler="y" * 1400)
+    Executor(_cfg()).execute_plan(
+        [{
+            "action": "split", "target": "user", "index": 0,
+            "keep": "Omar Minaya, SULLEN. WebKit iPhone.",
+            "routes": [{"action": "route-to-provider",
+                        "text": "UNIQUE RETAINED CLAUSE " + "q" * 3000}],
+            "reason": "test",
+        }],
+        run_id="over-limit-retain", provenance="test",
+    )
+    blob = " ".join(st.read_entries("user"))
+    assert "UNIQUE RETAINED CLAUSE" in blob, (
+        "the retained clause was discarded by the limit guard"
+    )
+
+
+# --- defect 5: restore() pruned the very snapshot it was reading ---------
+
+
+def test_restoring_the_oldest_snapshot_keeps_that_snapshot(tmp_path):
+    """The undo snapshot can push the cap over, and the prune then deleted
+    the OLDEST -- which was the file being restored. Verified failure: the
+    restore raised FileNotFoundError and the only good copy was gone."""
+    from memtriage import snapshots
+
+    st.write_entries("user", ["original content"])
+    data = tmp_path / "data"
+    names = []
+    for i in range(5):
+        r = snapshots.take(data, "user", f"run-{i}", keep=5)
+        if r and r.get("ok"):
+            names.append(pathlib.Path(r["path"]).name)
+    st.write_entries("user", ["MANGLED"])
+
+    oldest = sorted(names)[0]
+    out = snapshots.restore(data, "user", oldest, keep=5)
+    assert out.get("restored"), out
+    assert st.read_entries("user") == ["original content"]
+    assert (data / "snapshots" / oldest).exists(), (
+        "the restored-from snapshot must survive the restore"
+    )

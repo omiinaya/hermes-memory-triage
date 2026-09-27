@@ -642,11 +642,44 @@ class Executor:
                     f"({memory_store.char_count(final):,} with appends) — "
                     f"appends dropped, removals kept"
                 )
-                appends[target] = []
-                final = [
-                    e for i, e in enumerate(original[target])
-                    if i not in removals[target]
-                ]
+                # Dropping a split/consolidate append is NEVER a neutral trim.
+                # That append is the surviving content: dropping it deletes the
+                # source and then discards the text meant to replace it. Two
+                # distinct cases, both losses:
+                #
+                #  (a) a pure replacement (its source survives the drop) --
+                #      restore the source instead of deleting it;
+                #  (b) a replacement carrying a RETAINED clause that exists
+                #      nowhere else -- that text is simply gone if dropped.
+                #
+                # Observed (a) destroying an identity-guarded USER entry on a
+                # store that was merely over budget. A limit guard must never
+                # trade a source for a replacement it then throws away, so
+                # when any removal depends on an append, revoke the removal
+                # and keep the store as it is.
+                if self._appends_back_removals(target, removals[target]):
+                    self.errors.append(
+                        f"target '{target}' is over its {limit:,}-char limit; "
+                        f"dropping the replacement text would have deleted "
+                        f"the source without preserving it, so the removals "
+                        f"are revoked and the store is left as-is"
+                    )
+                    removals[target] = set()
+                    # The appends are KEPT here, not dropped. With the
+                    # removals revoked the store is already over its limit,
+                    # but these appends may carry a clause that exists
+                    # nowhere else (a split clause whose route failed), and
+                    # dropping them would lose it outright. The store being
+                    # over budget is the status quo we were handed; silently
+                    # deleting unique content to tidy it is not a trade the
+                    # plugin gets to make silently.
+                    final = list(original[target]) + appends[target]
+                else:
+                    appends[target] = []
+                    final = [
+                        e for i, e in enumerate(original[target])
+                        if i not in removals[target]
+                    ]
             if final != original[target]:
                 # PRE-WRITE SNAPSHOT. Quarantine covers entries this plan
                 # removed; it does NOT cover the file this write replaces. The
@@ -1094,6 +1127,24 @@ class Executor:
         self._ledger(
             "split", f"{target}#split#{self._run_id}", keep_text[:80]
         )
+
+    def _appends_back_removals(self, target: str, removals) -> bool:
+        """True when dropping this target's appends would lose content.
+
+        Two ways that happens: a recorded replacement whose source entry is
+        being removed, or a replacement carrying a clause that was re-appended
+        after its route failed (sources=None) -- that clause exists nowhere
+        else, so dropping the append deletes it outright.
+        """
+        if not removals or not self._append_sources.get(target):
+            return False
+        for src in self._append_sources[target]:
+            if not src:
+                # sources=None: carries unique retained content.
+                return True
+            if any(i in removals for i in src):
+                return True
+        return False
 
     def _add_append(
         self,

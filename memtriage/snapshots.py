@@ -77,6 +77,7 @@ def take(
     target: str,
     run_id: str,
     keep: int = DEFAULT_RETAIN_SNAPSHOTS,
+    protect: Optional[Path] = None,
 ) -> Optional[Dict[str, Any]]:
     """Copy the target's store file aside BEFORE it is overwritten.
 
@@ -85,6 +86,10 @@ def take(
     than destroys. Never raises: a failed backup must not block the write it
     was meant to protect, but the caller MUST see that it failed, so the
     record carries ``ok=False`` and the reason.
+
+    ``protect`` names a snapshot that the retention prune must not delete.
+    restore() passes the snapshot it is about to read, so taking its undo
+    copy cannot prune away the very file the restore depends on.
     """
     from . import store as memory_store
 
@@ -119,12 +124,20 @@ def take(
     except OSError as exc:
         rec.update(reason=f"{type(exc).__name__}: {exc}")
         return rec
-    _prune(data_dir, target, keep)
+    _prune(data_dir, target, keep, protect=protect)
     return rec
 
 
-def _prune(data_dir: Path, target: str, keep: int) -> int:
-    """Drop the oldest snapshots for a target, newest kept."""
+def _prune(
+    data_dir: Path, target: str, keep: int,
+    protect: Optional[Path] = None,
+) -> int:
+    """Drop the oldest snapshots for a target, newest kept.
+
+    ``protect`` names a snapshot that must survive even if it is the oldest.
+    restore() is reading that exact file moments later; pruning it first is
+    how the recovery path destroys the only good copy.
+    """
     if keep <= 0:
         return 0
     try:
@@ -140,8 +153,20 @@ def _prune(data_dir: Path, target: str, keep: int) -> int:
         )
     except (OSError, IndexError):
         return 0
+    protected = None
+    if protect is not None:
+        try:
+            protected = Path(protect).resolve()
+        except OSError:
+            protected = None
     removed = 0
     for stale in snaps[keep:]:
+        if protected is not None:
+            try:
+                if stale.resolve() == protected:
+                    continue
+            except OSError:
+                pass
         try:
             stale.unlink()
             removed += 1
@@ -232,15 +257,29 @@ def restore(
                 ),
             }
         src = matches[0]
+    src_path = Path(src)
+    # The undo snapshot can push the retention cap over, and _prune would
+    # then delete the OLDEST snapshot -- which, when the user is restoring
+    # exactly that oldest one, is the file about to be read. Verified failure:
+    # copy2 raised FileNotFoundError and the only good copy was gone, i.e. the
+    # recovery path destroyed the thing it was recovering FROM. `protect`
+    # exempts the source from the prune for the duration of this restore.
     try:
-        undo = take(data_dir, target, "before-restore", keep=keep)
+        undo = take(data_dir, target, "before-restore", keep=keep,
+                    protect=src_path)
     except OSError as exc:
         undo = {"ok": False, "reason": str(exc)}
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         with memory_store.file_lock(dest):
             tmp = dest.with_name(dest.name + f".restore{os.getpid()}")
-            shutil.copy2(src, tmp)
+            # copy the BYTES, then re-apply the source's mtime: a failed
+            # copy2 can otherwise leave a partial temp file behind.
+            shutil.copyfile(src_path, tmp)
+            try:
+                shutil.copystat(src_path, tmp)
+            except OSError:
+                pass
             os.replace(tmp, dest)
     except OSError as exc:
         return {
@@ -248,6 +287,10 @@ def restore(
             "reason": f"{type(exc).__name__}: {exc}",
             "undo": undo,
         }
+    # No prune after the copy. The restore already made the source
+    # unnecessary, but deleting it removes the only evidence of what was
+    # restored and leaves the retention count permanently one over the cap
+    # until the next write. The cap is enforced on the next take().
     return {
         "restored": True,
         "target": target,
