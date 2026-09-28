@@ -34,7 +34,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from . import ledger, locking, quarantine, snapshots, store as memory_store
 from .config import Config, _default_data_dir
@@ -471,6 +471,7 @@ class Executor:
         self,
         key: Tuple[str, str],
         target: str,
+        index: Optional[int] = None,
         created: bool = False,
         snapshot: Optional[str] = None,
     ) -> Optional[str]:
@@ -503,6 +504,7 @@ class Executor:
             snap = str(got) if got else None
         self._undo_tokens.append(
             {"kind": kind, "path": path_s, "target": target,
+             "index": index,
              "snapshot": snap, "created": created,
              # The sequence the snapshot was taken with, so the undo can
              # rewind last-in-first-out. Read it from the counter the
@@ -511,7 +513,9 @@ class Executor:
         )
         return snap
 
-    def _undo_routes(self, target: str) -> List[str]:
+    def _undo_routes(
+        self, target: str, only_index: Optional[Set[int]] = None
+    ) -> List[str]:
         """Undo route writes justified by removals that a guard revoked.
 
         Called when a guard clears ``removals[target]``: the source entries
@@ -520,6 +524,10 @@ class Executor:
         unexplained. Only writes for THIS target are undone -- another
         target's routes are unaffected, and a route with no recorded target
         is left alone rather than guessed at.
+
+        ``only_index`` restricts the rewind to specific source entries. A
+        guard that drops SOME removals (the non-atomic empty-memory floor)
+        must not undo the writes belonging to the ones it still honours.
         """
         undone: List[str] = []
         # REVERSE order. Each snapshot holds the file as it was BEFORE that
@@ -529,7 +537,8 @@ class Executor:
         # still found nine of them in the file. Rewind last-in-first-out.
         for tok in sorted(
             (t for t in self._undo_tokens
-             if t.get("target") == target and not t.get("undone")),
+             if t.get("target") == target and not t.get("undone")
+             and (only_index is None or t.get("index") in only_index)),
             key=lambda t: t.get("seq", 0),
             reverse=True,
         ):
@@ -874,36 +883,58 @@ class Executor:
             # The "never empty memory" rule was dead: floor==0.0 made
             # `post_fraction < floor` unsatisfiable. Special-case it.
             if target == memory_store.TARGET_MEMORY and removals[target] and not final:
-                self.errors.append(
-                    "target 'memory' would be emptied entirely — refused; "
-                    "source entries kept"
-                )
-                removals[target] = set()
-                dropped = self._withdraw_replacement(
-                    target, appends[target], original[target]
-                )
-                if dropped:
+                # NON-ATOMIC, 2026-09-27. This guard used to discard the
+                # whole plan: if the model routed every entry but one, that
+                # last unrouted entry made `final` empty and ALL N removals
+                # were thrown away. Reproduced in scratch/undo_repro.py --
+                # routing 10 of 10 freed 0 chars, and adding a single `keep`
+                # freed everything. Cerveau routes 9-or-10 of 10 nearly every
+                # run, so the plan that should relieve the store almost
+                # always landed on the one entry count the guard rejected.
+                #
+                # The rule still stands (memory is never emptied); the
+                # granularity was wrong. Keep the SMALLEST entry, which is
+                # the one that most reduces pressure anyway, and honour every
+                # removal the plan actually justified.
+                sizes = {
+                    i: memory_store.char_count([e])
+                    for i, e in enumerate(original[target])
+                }
+                if not sizes:
+                    # Already empty: nothing to keep, nothing to remove, no
+                    # plan to salvage. `min()` on an empty mapping raises.
+                    removals[target] = set()
+                    final = list(original[target])
+                else:
+                    keeper = min(sizes, key=lambda i: sizes[i])
+                    n_all = len(removals[target])
                     self.errors.append(
-                        f"withdrew {dropped} replacement entr"
-                        f"{'y' if dropped == 1 else 'ies'} for 'memory': their "
-                        f"source entries were kept, so the merged text would "
-                        f"have duplicated live content"
+                        f"target 'memory' would be emptied entirely — kept "
+                        f"its smallest entry #{keeper} ({sizes[keeper]} chars) "
+                        f"and honoured the other {n_all - 1} removal(s) "
+                        f"rather than discarding the plan; previously this "
+                        f"refused the whole run"
                     )
-                # The source entries are staying, so the skill/script writes
-                # that were paying for their removal must go back too.
-                # Before this, a plan routing all 10 memory entries left the
-                # store untouched (this guard) while 19 skill writes stayed
-                # committed: the text existed in a skill, in the store, and in
-                # no record of why. A guard that revokes a removal must revoke
-                # the replacement as well.
-                undone = self._undo_routes(target)
-                if undone:
-                    self.errors.append(
-                        f"undid {len(undone)} route write(s) for 'memory' "
-                        f"whose source entries were kept: "
-                        + "; ".join(undone)
+                    removals[target].discard(keeper)
+                    # Only the writes whose source is now STAYING get undone.
+                    undone = self._undo_routes(target, only_index={keeper})
+                    if undone:
+                        self.errors.append(
+                            f"undid {len(undone)} route write(s) for "
+                            f"'memory' whose source entry was kept: "
+                            + "; ".join(undone)
+                        )
+                    final = [
+                        e for i, e in enumerate(original[target])
+                        if i not in removals[target]
+                    ]
+                    assert final, (
+                        "unreachable: `keeper` was just discarded from "
+                        "removals, so at least one entry must survive. If "
+                        "this ever fires the floor has a logic error and the "
+                        "store would be written empty."
                     )
-                final = list(original[target])
+
             # Do not push a target PAST its own limit — once over, every
             # built-in `append` is refused for the rest of the session.
             if limit and memory_store.char_count(final) > limit and appends[target]:
@@ -1270,6 +1301,7 @@ class Executor:
         self._record_undo(
             ("skill", str(path)),
             a.get("target", "memory"),
+            index=a.get("index"),
             snapshot=str(snap) if snap else None,
         )
         self._note_decision("applied", a, f"appended to existing skill '{path.parent.name}' ({path})")
@@ -1314,7 +1346,10 @@ class Executor:
         # exactly that on 2026-09-27, leaving 19 skill writes committed while
         # the store rolled back). Without a token the only remedy is a manual
         # hunt through snapshots/skills.
-        self._record_undo(("skill", str(target)), a.get("target", "memory"))
+        self._record_undo(
+            ("skill", str(target)), a.get("target", "memory"),
+            index=a.get("index"),
+        )
         self._note_decision("applied", a, f"routed to skill '{name}' ({target})")
         self._ledger("skill", str(target), body[:200])
 
@@ -1374,7 +1409,7 @@ class Executor:
             _make_executable(script_path)
         self._record_undo(
             ("script", str(script_path)), a.get("target", "memory"),
-            created=not existed_before,
+            index=a.get("index"), created=not existed_before,
         )
         self._note_decision("applied", a, f"routed to script '{script_name}' ({script_path})")
         if a.get("cron_schedule"):
