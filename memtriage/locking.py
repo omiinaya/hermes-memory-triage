@@ -165,3 +165,42 @@ def _exclusive_create(lock_file: Path) -> None:
         os.write(fd, str(os.getpid()).encode("ascii"))
     finally:
         os.close(fd)
+
+
+@contextmanager
+def multi_store_lock(
+    store_paths, *, timeout: float = 10.0, poll: float = 0.05
+) -> "Iterator[list]":
+    """Hold the lock for EVERY store this plan will rewrite.
+
+    WHY THIS EXISTS. ``execute_plan`` used to take a lock on ONE store (the
+    profile) and then read AND rewrite BOTH. ``_lock_path`` derives the lock
+    file from the store path, so ``MEMORY.md.lock`` and ``USER.md.lock`` are
+    different inodes. The built-in ``memory`` tool locks per-file, so an
+    append to ``MEMORY.md`` took ``MEMORY.md.lock`` -- which nothing held --
+    and the executor's later ``os.replace`` published a body built from a
+    snapshot taken before that append. The append was destroyed with no error
+    raised anywhere. Reproduced 2026-09-28; the comment above that lock
+    claimed the hole was closed.
+
+    ORDER MATTERS and is fixed (sorted by path) so two writers cannot
+    deadlock by grabbing the pair in opposite orders.
+
+    Yields the list of paths whose lock was actually acquired, so the caller
+    can report which store it failed to exclude. An empty list means NOTHING
+    is held; callers must treat that as "proceeding unlocked", not success.
+    """
+    paths = sorted({Path(p) for p in store_paths}, key=lambda p: str(p))
+    held: "list[Path]" = []
+    contexts = []
+    try:
+        for p in paths:
+            ctx = store_lock(p, timeout=timeout, poll=poll)
+            got = ctx.__enter__()
+            contexts.append(ctx)
+            if got:
+                held.append(p)
+        yield held
+    finally:
+        for ctx in reversed(contexts):
+            ctx.__exit__(None, None, None)

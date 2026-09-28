@@ -678,13 +678,28 @@ class Executor:
         # a `memory` append landing between our snapshot and our os.replace
         # is silently discarded — and the index-staleness check cannot see
         # it, because an append at the end leaves every index intact.
-        # Whichever writer gets here first wins; the other waits briefly.
-        ctx = locking.store_lock(memory_store.path_for(memory_store.TARGET_USER))
-        acquired = ctx.__enter__()
+        #
+        # BOTH stores, not one. This used to lock only the profile while
+        # _execute_locked read and rewrote MEMORY.md as well. _lock_path is
+        # per-file, so MEMORY.md.lock and USER.md.lock are different inodes
+        # and the memory tool's append was never excluded: a write landing in
+        # the read-to-write window was destroyed with no error anywhere.
+        # Reproduced 2026-09-28. multi_store_lock takes both in a fixed
+        # order so two executors cannot deadlock against each other.
+        lock_paths = [
+            memory_store.path_for(t)
+            for t in (memory_store.TARGET_MEMORY, memory_store.TARGET_USER)
+        ]
+        ctx = locking.multi_store_lock(lock_paths)
+        held = ctx.__enter__()
+        acquired = len(held) == len(lock_paths)
         if not acquired:
+            missing = [p.name for p in lock_paths if p not in held]
             self.add_error(
-                "could not acquire the memory-store lock within the timeout; "
-                "another writer is active. Proceeding — verify the result."
+                f"could not acquire the store lock(s) for {', '.join(missing)} "
+                f"within the timeout; another writer is active. Proceeding "
+                f"unlocked — a concurrent memory write may be lost. "
+                f"Verify the result."
             )
         try:
             return self._execute_locked(
