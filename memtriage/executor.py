@@ -431,6 +431,12 @@ class Executor:
         # handles each target independently.
         # (index, message). index -1 = a note not tied to one entry.
         self._provisional: Dict[str, List[tuple]] = {}
+        # C4: set when a store write raises OSError. It means no index moved,
+        # so the run is safe to retry -- and must NOT be stamped as applied,
+        # or the retry is permanently refused. Also gates the route-write
+        # rollback: a failed write leaves every source entry in place, so
+        # the route writes that were paying for their removal are orphans.
+        self._store_write_failed: bool = False
         # Pre-write snapshot paths taken this run, surfaced in the summary so
         # a user can undo the whole run from the report.
         self._snapshot_records: List[Dict[str, Any]] = []
@@ -519,6 +525,23 @@ class Executor:
         if snap is None:
             got = self._take_path_snapshot(path)
             snap = str(got) if got else None
+        # DERIVE `created`, do not trust the caller. A new file has no prior
+        # state, and `_take_path_snapshot` records that as an EMPTY snapshot
+        # (it writes "" so the token's path always exists). So "the snapshot is
+        # zero bytes" IS the fact that the file did not exist, and it is
+        # knowable here rather than at each of the three call sites.
+        #
+        # This matters because the undo branches on `created`: True unlinks
+        # the file, False copies the snapshot over it. A brand-new skill
+        # recorded with created=False was therefore "restored" from its own
+        # empty snapshot -- leaving a zero-byte SKILL.md, and the directory
+        # with it, exactly where the orphan had been. The caller-supplied
+        # flag was the bug: _do_skill never passed it at all.
+        if snap and not created:
+            try:
+                created = Path(snap).stat().st_size == 0
+            except OSError:
+                created = False
         self._undo_tokens.append(
             {"kind": kind, "path": path_s, "target": target,
              "index": index,
@@ -565,6 +588,21 @@ class Executor:
                 if tok.get("created") or not snap or not Path(snap).exists():
                     if path.exists():
                         path.unlink()
+                        # A routed SKILL.md lives in <category>/<name>/, so
+                        # deleting the file alone leaves an empty skill
+                        # directory -- the orphan's footprint either way,
+                        # and an empty skill dir is enough to make
+                        # inventory_skills report a skill that has no body.
+                        # Only remove the directory when the write created
+                        # it and it is now empty; never recurse.
+                        parent = path.parent
+                        try:
+                            if parent.is_dir() and parent != path:
+                                next(parent.iterdir())
+                        except StopIteration:
+                            parent.rmdir()
+                        except OSError:
+                            pass
                         undone.append(f"removed new {tok['kind']} {path}")
                     tok["undone"] = True
                     continue
@@ -1109,6 +1147,7 @@ class Executor:
                         memory_store.write_entries(target, final)
                     except OSError as exc:
                         wrote = False
+                        self._store_write_failed = True
                         # One target failing must not abort the other or lose
                         # the record of what already committed.
                         self.add_error(
@@ -1116,9 +1155,38 @@ class Executor:
                             f"{type(exc).__name__}: {exc}"
                         )
                     if not wrote:
-                        # The store on disk still holds the originals, so
-                        # quarantining the removals would record a restore
-                        # source for entries that were never taken out.
+                        # C4 (2026-09-28). The store write failed, so the file
+                        # on disk still holds every original entry. That
+                        # means NOT ONE of this target's removals took
+                        # effect -- but the route writes that were paying
+                        # for those removals (skill/provider/script) already
+                        # committed, at _apply time, before the store was
+                        # ever touched.
+                        #
+                        # Reproduced in scratch/writefail_orphan.py: 9 skill
+                        # writes committed, the store unchanged, 0 rolled
+                        # back, and the run stamped into applied_runs.json
+                        # anyway -- so the replay guard permanently refused a
+                        # legitimate retry, and ledger.json asserted the
+                        # knowledge was routed when it was not.
+                        #
+                        # Same contract as every other guard above: a source
+                        # that stays means the write that replaced it goes
+                        # back. Leaving them orphaned is the one failure mode
+                        # worse than a refused run, because the store and the
+                        # destinations now disagree and nothing reconciles
+                        # them.
+                        undone = self._undo_routes(target)
+                        if undone:
+                            self.add_error(
+                                f"undid {len(undone)} route write(s) for "
+                                f"'{target}': the store write failed, so none "
+                                f"of this target's removals took effect and "
+                                f"the routed copies were now orphans"
+                                + (": " + "; ".join(undone) if undone else "")
+                            )
+                        # Quarantining here would record restore sources for
+                        # entries that were never taken out.
                         continue
                 # Quarantine is flushed only for removals that SURVIVED every
                 # guard, so a refused eviction never leaves a phantom record
@@ -1208,10 +1276,27 @@ class Executor:
 
         # Record the run as landed so a retry is refused rather than replayed
         # against a store whose indices have since shifted.
-        try:
-            _mark_applied(self.cfg, self._run_id)
-        except OSError as exc:
-            self.add_error(f"could not record run id for replay safety: {exc}")
+        #
+        # C4 (2026-09-28). ... but NOT when a store write actually failed. The
+        # replay stamp exists to stop a plan being re-applied to a store whose
+        # indices have moved. If the write never landed, no index moved, so
+        # the stamp protects nothing and costs everything: it permanently
+        # refuses the legitimate retry that would fix the failure. Verified
+        # in scratch/writefail_orphan.py -- the run was stamped despite the
+        # failed write.
+        if self._store_write_failed:
+            self.add_error(
+                f"run {self._run_id} was NOT stamped as applied: a store "
+                f"write failed, so the run can be retried safely (no index "
+                f"moved). Stamping it would permanently block that retry."
+            )
+        else:
+            try:
+                _mark_applied(self.cfg, self._run_id)
+            except OSError as exc:
+                self.add_error(
+                    f"could not record run id for replay safety: {exc}"
+                )
 
         after = _usage_snapshot()
         return {
@@ -1528,16 +1613,17 @@ class Executor:
             name=_safe(name), description=description,
             provenance=_yaml_scalar(self._provenance),
         ) + body + "\n"
-        _write_atomic(target, content)
-        # Record how to UNDO this. A guard can revoke the matching removal
-        # after the write has already landed (the empty-memory floor did
-        # exactly that on 2026-09-27, leaving 19 skill writes committed while
-        # the store rolled back). Without a token the only remedy is a manual
-        # hunt through snapshots/skills.
+        # Snapshot BEFORE the write, never after. The undo token's whole
+        # purpose is to restore the file as it was BEFORE this write; taking
+        # the snapshot after `_write_atomic` captured the content we had just
+        # written, so every "undo" faithfully restored the orphan it was
+        # supposed to remove. Reproduced in scratch/undo_after_write.py:
+        # 10 route writes "undone" and all 10 files still on disk.
         self._record_undo(
             ("skill", str(target)), a.get("target", "memory"),
             index=a.get("index"),
         )
+        _write_atomic(target, content)
         self._note_decision("applied", a, f"routed to skill '{name}' ({target})")
         self._ledger("skill", str(target), body[:200])
 
@@ -1592,13 +1678,16 @@ class Executor:
             raise ValueError(f"unsupported script_ext {ext!r}")
         script_path = self.cfg.scripts_root / f"{_safe(script_name)}.{ext}"
         existed_before = script_path.exists()
-        _write_atomic(script_path, body)
-        if ext in ("sh", "bash"):
-            _make_executable(script_path)
+        # Same ordering rule as _do_skill: record the undo (which takes the
+        # snapshot) BEFORE the write. Snapshotting afterwards captured the
+        # body we had just written, so the undo restored the orphan.
         self._record_undo(
             ("script", str(script_path)), a.get("target", "memory"),
             index=a.get("index"), created=not existed_before,
         )
+        _write_atomic(script_path, body)
+        if ext in ("sh", "bash"):
+            _make_executable(script_path)
         self._note_decision("applied", a, f"routed to script '{script_name}' ({script_path})")
         if a.get("cron_schedule"):
             result = _register_cron(str(script_path), a["cron_schedule"])
