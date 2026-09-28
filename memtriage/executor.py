@@ -420,6 +420,137 @@ class Executor:
         # One entry per decision, with the model's own stated reason, so an
         # unattended `auto` run is auditable after the fact.
         self.decisions: List[Dict[str, Any]] = []
+        # Route side effects (skill/script writes) that have already landed,
+        # with the snapshot taken BEFORE each one. A guard can revoke the
+        # matching removal after the write is on disk -- the empty-memory floor
+        # did exactly that on 2026-09-27, committing 19 skill writes while
+        # rolling the store back. Provenance, not text similarity, identifies
+        # the write a revoked removal justified.
+        self._undo_tokens: List[Dict[str, Any]] = []
+
+    # -- route side effects ---------------------------------------------
+
+    def _take_path_snapshot(self, path: Path) -> Optional[Path]:
+        """Copy a file to the snapshot dir under a name unique to this write.
+
+        ONE counter and ONE place that builds the name. It previously lived
+        twice (here and in :meth:`_record_undo`) with two independent
+        sequences, so an undo ordered a create against an append by numbers
+        that were not comparable and could replay a mid-run state.
+        """
+        snap_dir = (
+            snapshots.snapshots_dir(self.cfg.data_dir)
+            / snapshots.SKILLS_SNAPSHOT_SUBDIR
+        )
+        try:
+            snap_dir.mkdir(parents=True, exist_ok=True)
+            n = getattr(self, "_undo_seq", 0) + 1
+            self._undo_seq = n
+            dest = snap_dir / (
+                f"{path.parent.name}__{self._run_id}__{n:03d}__{path.name}"
+            )
+            tmp = dest.with_name(dest.name + f".tmp{os.getpid()}")
+            if path.exists():
+                shutil.copy2(path, tmp)
+            else:
+                # A brand-new file has no prior state. Record the empty state
+                # so the token's path always exists; `created` tells the undo
+                # to delete rather than restore.
+                dest.write_text("", encoding="utf-8")
+                return dest
+            os.replace(tmp, dest)
+            return dest
+        except (OSError, ValueError) as exc:  # noqa: BLE001
+            self.errors.append(
+                f"pre-write snapshot FAILED for {path}: {exc}; this write is "
+                f"not byte-recoverable if a guard revokes it"
+            )
+            return None
+
+    def _record_undo(
+        self,
+        key: Tuple[str, str],
+        target: str,
+        created: bool = False,
+        snapshot: Optional[str] = None,
+    ) -> Optional[str]:
+        """Snapshot a written path and remember how to undo it.
+
+        A route writes its destination FIRST and removes the source entry
+        later, in the guard loop. If a guard then revokes that removal, the
+        write is orphaned: the store is unchanged, the skill carries text the
+        store no longer explains, and the next run re-routes it. So every
+        route write takes its own pre-write snapshot here, at the moment of
+        the write, independent of whether the store rewrite survives.
+
+        ``target`` is the store whose entry paid for this write, so a guard
+        revoking THAT target's removals can undo exactly the right writes and
+        leave another target's routes alone.
+
+        ``snapshot`` lets a caller pass a pre-write copy it already took
+        (``_extend_skill`` does), rather than reading the file a second time.
+
+        Returns the snapshot path, or None if the snapshot failed (the write
+        still proceeds -- refusing here would turn a full disk into a routing
+        outage -- but it is reported, because it means the write is
+        unrecoverable if the guard revokes it).
+        """
+        kind, path_s = key
+        path = Path(path_s)
+        snap: Optional[str] = snapshot
+        if snap is None:
+            got = self._take_path_snapshot(path)
+            snap = str(got) if got else None
+        self._undo_tokens.append(
+            {"kind": kind, "path": path_s, "target": target,
+             "snapshot": snap, "created": created,
+             # The sequence the snapshot was taken with, so the undo can
+             # rewind last-in-first-out. Read it from the counter the
+             # helper just advanced, not from a separate field.
+             "seq": getattr(self, "_undo_seq", 0)}
+        )
+        return snap
+
+    def _undo_routes(self, target: str) -> List[str]:
+        """Undo route writes justified by removals that a guard revoked.
+
+        Called when a guard clears ``removals[target]``: the source entries
+        are staying, so the destinations they were paying for must not keep
+        the text, or the same knowledge lives in two places with one copy
+        unexplained. Only writes for THIS target are undone -- another
+        target's routes are unaffected, and a route with no recorded target
+        is left alone rather than guessed at.
+        """
+        undone: List[str] = []
+        # REVERSE order. Each snapshot holds the file as it was BEFORE that
+        # write, so rolling them back in forward order replays the oldest
+        # copy last and leaves every append but the first in place. The
+        # repro that motivated this printed "undid 10 route writes" and
+        # still found nine of them in the file. Rewind last-in-first-out.
+        for tok in sorted(
+            (t for t in self._undo_tokens
+             if t.get("target") == target and not t.get("undone")),
+            key=lambda t: t.get("seq", 0),
+            reverse=True,
+        ):
+            path = Path(tok["path"])
+            snap = tok.get("snapshot")
+            try:
+                if tok.get("created") or not snap or not Path(snap).exists():
+                    if path.exists():
+                        path.unlink()
+                        undone.append(f"removed new {tok['kind']} {path}")
+                    tok["undone"] = True
+                    continue
+                shutil.copy2(snap, path)
+                undone.append(f"restored {tok['kind']} {path} from snapshot")
+            except OSError as exc:  # noqa: BLE001
+                self.errors.append(
+                    f"could not undo {tok['kind']} {path}: {exc}; it stays "
+                    f"written and its source entry is still in place"
+                )
+            tok["undone"] = True
+        return undone
 
     def _note(self, msg: str) -> None:
         self.applied.append(msg)
@@ -728,6 +859,16 @@ class Executor:
                         f"their source entries were kept, so the merged text "
                         f"would have duplicated live content"
                     )
+                # Same contract as the empty-memory floor below: the sources
+                # stay, so the route writes that were paying for their removal
+                # go back.
+                undone = self._undo_routes(target)
+                if undone:
+                    self.errors.append(
+                        f"undid {len(undone)} route write(s) for '{target}' "
+                        f"whose source entries were kept: "
+                        + "; ".join(undone)
+                    )
                 kept = list(original[target])
                 final = kept + appends[target]
             # The "never empty memory" rule was dead: floor==0.0 made
@@ -747,6 +888,20 @@ class Executor:
                         f"{'y' if dropped == 1 else 'ies'} for 'memory': their "
                         f"source entries were kept, so the merged text would "
                         f"have duplicated live content"
+                    )
+                # The source entries are staying, so the skill/script writes
+                # that were paying for their removal must go back too.
+                # Before this, a plan routing all 10 memory entries left the
+                # store untouched (this guard) while 19 skill writes stayed
+                # committed: the text existed in a skill, in the store, and in
+                # no record of why. A guard that revokes a removal must revoke
+                # the replacement as well.
+                undone = self._undo_routes(target)
+                if undone:
+                    self.errors.append(
+                        f"undid {len(undone)} route write(s) for 'memory' "
+                        f"whose source entries were kept: "
+                        + "; ".join(undone)
                     )
                 final = list(original[target])
             # Do not push a target PAST its own limit — once over, every
@@ -896,6 +1051,13 @@ class Executor:
             # an `auto` run is auditable without reading the JSONL log.
             "decisions": list(self.decisions),
             "decision_log": str(Path(_active_data_dir(self.cfg)) / DECISION_LOG_NAME),
+            # Route writes that landed and were then UNDONE because a guard
+            # revoked the removal they paid for. Non-empty means the plan's
+            # destinations were rolled back, so the store is authoritative
+            # and the skills tree matches it again.
+            "route_writes_undone": [
+                t for t in self._undo_tokens if t.get("undone")
+            ],
         }
 
     # -- per-action dispatch ---------------------------------------------
@@ -1096,26 +1258,20 @@ class Executor:
         if marker and marker in existing:
             self._note(f"skill '{path.parent.name}' already contains this content; nothing to append")
             return
-        snap = None
-        try:
-            # A plain file copy, NOT snapshots.take(): that resolves its source
-            # through store.path_for(target), which only knows the two memory
-            # stores. A skill is an arbitrary path, so copy it directly.
-            snap_dir = snapshots.snapshots_dir(self.cfg.data_dir) / "skills"
-            snap_dir.mkdir(parents=True, exist_ok=True)
-            dest = snap_dir / f"{path.parent.name}__{self._run_id}__{path.name}"
-            tmp = dest.with_name(dest.name + f".tmp{os.getpid()}")
-            shutil.copy2(path, tmp)
-            os.replace(tmp, dest)
-            snap = dest
-        except (OSError, ValueError) as exc:  # noqa: BLE001
-            # A failed snapshot does not block the write: the write is still
-            # atomic, and refusing here would turn a full disk into a total
-            # routing outage. Report it so the append is not silently
-            # unrecoverable.
-            self._note(f"pre-write snapshot FAILED for {path}: {exc}")
+        # A plain file copy, NOT snapshots.take(): that resolves its source
+        # through store.path_for(target), which only knows the two memory
+        # stores. A skill is an arbitrary path, so copy it directly.
+        # A failed snapshot does not block the write: the write is still
+        # atomic, and refusing here would turn a full disk into a total
+        # routing outage. The helper reports the failure instead.
+        snap = self._take_path_snapshot(path)
         addition = f"\n\n## Routed by memtriage ({self._provenance})\n\n{marker}\n"
         _write_atomic(path, existing.rstrip("\n") + addition)
+        self._record_undo(
+            ("skill", str(path)),
+            a.get("target", "memory"),
+            snapshot=str(snap) if snap else None,
+        )
         self._note_decision("applied", a, f"appended to existing skill '{path.parent.name}' ({path})")
         if snap:
             self._note(f"  pre-write snapshot: {snap}")
@@ -1153,6 +1309,12 @@ class Executor:
             provenance=_yaml_scalar(self._provenance),
         ) + body + "\n"
         _write_atomic(target, content)
+        # Record how to UNDO this. A guard can revoke the matching removal
+        # after the write has already landed (the empty-memory floor did
+        # exactly that on 2026-09-27, leaving 19 skill writes committed while
+        # the store rolled back). Without a token the only remedy is a manual
+        # hunt through snapshots/skills.
+        self._record_undo(("skill", str(target)), a.get("target", "memory"))
         self._note_decision("applied", a, f"routed to skill '{name}' ({target})")
         self._ledger("skill", str(target), body[:200])
 
@@ -1206,9 +1368,14 @@ class Executor:
         if ext not in ("py", "sh", "bash"):
             raise ValueError(f"unsupported script_ext {ext!r}")
         script_path = self.cfg.scripts_root / f"{_safe(script_name)}.{ext}"
+        existed_before = script_path.exists()
         _write_atomic(script_path, body)
         if ext in ("sh", "bash"):
             _make_executable(script_path)
+        self._record_undo(
+            ("script", str(script_path)), a.get("target", "memory"),
+            created=not existed_before,
+        )
         self._note_decision("applied", a, f"routed to script '{script_name}' ({script_path})")
         if a.get("cron_schedule"):
             result = _register_cron(str(script_path), a["cron_schedule"])

@@ -206,11 +206,19 @@ def list_skill_snapshots(data_dir: Path) -> List[Dict[str, Any]]:
             st = p.stat()
         except OSError:
             continue
-        parts = p.name.split("__", 2)
+        # `<skill>__<run_id>[__<NNN>]__<filename>`. The sequence number was
+        # added 2026-09-27: one run can append many entries to the SAME skill,
+        # and a shared snapshot name meant each write clobbered the previous
+        # snapshot, so an undo replayed the oldest copy and left the rest.
+        parts = p.name.split("__")
+        skill = parts[0]
+        run_id = parts[1] if len(parts) > 1 else ""
+        seq = parts[2] if len(parts) > 2 else ""
         out.append({
             "target": SKILLS_SNAPSHOT_SUBDIR,
-            "skill": parts[0],
-            "run_id": parts[1] if len(parts) > 1 else "",
+            "skill": skill,
+            "run_id": run_id,
+            "seq": seq,
             "path": str(p),
             "name": p.name,
             "bytes": st.st_size,
