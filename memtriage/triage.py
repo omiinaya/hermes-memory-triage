@@ -19,7 +19,12 @@ import time
 import uuid
 from typing import Any, Dict, List
 
+import logging
+
+_log = logging.getLogger(__name__)
+
 from . import cerveau as cerveau_mod
+from . import executor as executor_mod
 from . import inventory as inventory_mod
 from . import ledger as ledger_mod
 from . import learning as learning_mod
@@ -73,8 +78,57 @@ def run_triage(
         a.get("_source") == "deterministic-fallback" for a in actions
     )
 
+    # C2 (2026-09-28). A deterministic fallback is a NO-OP: every action is a
+    # `keep`, so a run that never consulted Cerveau is byte-identical in
+    # effect to one that consulted it and decided to change nothing. The only
+    # signal was `dispatcher`, computed here and read by exactly one test --
+    # grep-confirmed to appear in no report, no notification, no decision log
+    # and no state. Two unattended runs (16:49, 16:50) were exactly this.
+    #
+    # So the fallback is now stated in all three places an operator or an
+    # auditor actually reads: the report header, the decision log, and the
+    # persisted state. A fallback that cannot be seen is a silent failure.
+    if fallback_used and dispatch:
+        _log.warning(
+            "run %s: Cerveau was NOT consulted -- deterministic fallback in "
+            "use; every action is a no-op keep. The model reply was missing, "
+            "unparseable, or rejected.",
+            run_id,
+        )
+        # The decision log is the record Omar asked for: a run that consulted
+        # the model and a run that never did must be distinguishable there.
+        # Written before the executor, because the executor's own log starts
+        # with per-action lines that look identical either way.
+        executor_mod.log_decision(
+            run_id,
+            "blocked",
+            "Cerveau was NOT consulted; this run used the deterministic "
+            "all-keep fallback, so no entry was routed and nothing changed. "
+            "This is not a judgement that the store needed no triage.",
+            None,
+            cfg,
+        )
+        kept = sum(1 for a in actions if a.get("action") == "keep")
+        actions = list(actions)
+        for a in actions:
+            a.setdefault("reason", "")
+            a["reason"] = (
+                f"[FALLBACK: Cerveau was not consulted; this is an automatic "
+                f"no-op, not a judgement about this entry] {a['reason']}"
+            ).strip()
+        fallback_note = (
+            f"WARNING: Cerveau was not consulted for this run. The plan below "
+            f"is the deterministic fallback ({kept} of {len(actions)} action(s) "
+            f"are no-op keeps), NOT a model decision. Nothing was routed."
+        )
+    else:
+        fallback_note = ""
+
     report = plan_mod.render_report(
-        actions, usage_before={"memory": usage_before}, run_id=run_id
+        actions,
+        usage_before={"memory": usage_before},
+        run_id=run_id,
+        fallback_note=fallback_note,
     )
     report_path = plan_mod.save_report(cfg, run_id, report)
 
@@ -93,6 +147,13 @@ def run_triage(
 
     if cfg.mode == "auto":
         provenance = f"session:auto triage {run_id} ({reason})"
+        # C2: record the fallback in PERSISTED STATE, not just the returned
+        # dict. `result` is read by the plugin for the notification, but the
+        # notification is not what an operator greps three days later. State
+        # is what `mem_triage status` and the decision log show, so a run
+        # that silently did nothing is visible without re-reading code.
+        if fallback_used and dispatch:
+            state_mod.note_fallback(cfg, run_id)
         # Persist the plan EVEN THOUGH it is applied unattended. The manual
         # branch saves it for review; the auto branch used to save nothing, so
         # an unattended run left a report describing actions that no longer

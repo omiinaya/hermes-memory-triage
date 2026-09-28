@@ -157,3 +157,38 @@ def record_execution(cfg: Config, run_id: str, summary: Any) -> None:
 def last_execution(cfg: Config) -> Optional[Dict[str, Any]]:
     """The most recently applied plan's execution summary, if any."""
     return _load(cfg).get("last_execution")
+
+
+# Bounded: this is a "did the model get consulted" audit trail, not a log.
+# Enough to spot a streak of silent no-ops; old entries carry no signal once
+# the cause is fixed.
+FALLBACK_HISTORY = 20
+
+
+def note_fallback(cfg: Config, run_id: str) -> None:
+    """Record that a run used the deterministic fallback (C2).
+
+    A fallback run is a no-op -- every action is a ``keep`` -- so without
+    this the run is indistinguishable from a model that considered the
+    entries and changed nothing. Persisting it here means ``mem_triage
+    status`` and any audit of ``state.json`` can see it, rather than it
+    living only in a returned dict that nothing persists.
+    """
+    def mutate(state: Dict[str, Any]) -> Dict[str, Any]:
+        history = list(state.get("fallback_runs", []) or [])
+        history.append(
+            {
+                "run_id": run_id,
+                "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "why": "Cerveau not consulted; plan was the all-keep "
+                       "deterministic fallback",
+            }
+        )
+        state["fallback_runs"] = history[-FALLBACK_HISTORY:]
+        return state
+    _update(cfg, mutate)
+
+
+def fallback_runs(cfg: Config) -> list:
+    """Recent runs that used the deterministic fallback, oldest first."""
+    return list(_load(cfg).get("fallback_runs", []) or [])

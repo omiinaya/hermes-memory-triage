@@ -377,6 +377,15 @@ def _log_decision(
         logger.warning("decision log write failed: %s", exc, exc_info=True)
 
 
+# Public alias. triage.py needs to record the C2 fallback BEFORE any
+# Executor exists, because a fallback run's per-action log is an
+# all-`keep` list that looks exactly like a real run's. Without a line
+# saying the model was never consulted, the log cannot answer the only
+# question that matters. Alias rather than rename so the four internal
+# call sites and the tests that reference _log_decision keep working.
+log_decision = _log_decision
+
+
 def _active_data_dir(cfg: Optional[Config] = None) -> str:
     """Where the log lives.
 

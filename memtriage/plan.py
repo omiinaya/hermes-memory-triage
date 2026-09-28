@@ -53,6 +53,64 @@ class PlanValidationError(ValueError):
     """Raised when a plan received from Cerveau violates the contract."""
 
 
+import logging
+
+_log = logging.getLogger(__name__)
+
+
+def validate_partial(actions: List[Any]) -> Dict[str, Any]:
+    """Validate a plan action-by-action, keeping what is sound.
+
+    C1 (2026-09-28). ``validate()`` is all-or-nothing: it raises on the
+    FIRST malformed action, and ``parse_plan`` treats that as "this
+    candidate is not a plan" and moves on. So one bad action out of fifteen
+    discarded the other fourteen -- reproduced without a model in
+    scratch/chk_c1_blast_radius.py: 8 evict + 3 route-to-provider + 1
+    route-to-skill + 1 split + 1 malformed consolidate produced
+    ``PlanValidationError: No non-empty action array in Cerve reply
+    (consolidate action #12 needs >=2 entry indices.)`` and the run was
+    aborted with nothing freed.
+
+    The blast radius is worse than the malformed action deserves, because
+    the *whole plan* is dropped, not just the bad action, and the caller
+    then falls back to an all-keep no-op that is indistinguishable from a
+    real run (C2).
+
+    What this returns instead:
+
+      * ``ok``     -- the plan is fully valid; use ``clean`` wholesale.
+      * ``clean``  -- the individually valid actions, in order.
+      * ``dropped``-- descriptions of the rejected ones, for the log.
+
+    Refusing to invent: an action is never repaired, defaulted, or guessed
+    at here. It is either wholly valid or wholly dropped. In particular
+    the missing-``target`` rule stays absolute -- a cross-store write must
+    never be inferred -- so those actions are dropped, not defaulted.
+    """
+    if not isinstance(actions, list):
+        return {
+            "ok": False,
+            "clean": [],
+            "dropped": ["plan is not a JSON array of actions"],
+        }
+
+    clean: List[Dict[str, Any]] = []
+    dropped: List[str] = []
+    seen_touched: set = set()
+
+    for n, a in enumerate(actions):
+        try:
+            clean.extend(validate([a], _seen=seen_touched))
+        except PlanValidationError as exc:
+            dropped.append(f"action #{n}: {exc}")
+
+    return {
+        "ok": not dropped,
+        "clean": clean,
+        "dropped": dropped,
+    }
+
+
 def _array_spans(text: str) -> List[str]:
     """Yield every balanced JSON array substring, in order of appearance.
 
@@ -164,23 +222,64 @@ def parse_plan(raw: str) -> List[Dict[str, Any]]:
     Stray control characters inside strings are repaired first.
     """
     text = raw.strip()
-    if "```" in text:
-        import re
-
-        fences = re.findall(r"```(?:json)?\s+(.*?)```", text, re.DOTALL)
-        text = fences[0] if fences else text
+    # C1b (2026-09-28). This used to short-circuit to the FIRST fenced block
+    # and parse ONLY that, which bypassed _array_spans and therefore bypassed
+    # the ambiguity refusal below. A reply that echoes the schema inside a
+    # fence and then states the real plan bare parsed to the *reminder* --
+    # the prompt's own example -- instead of the plan. Both defects point the
+    # same way: collecting candidates and letting the ambiguity logic choose
+    # is strictly safer than trusting position.
+    #
+    # So fences are no longer special-cased at all. They are just text; the
+    # scanner finds every balanced JSON array anywhere in the reply, fenced
+    # or not, and the candidate-selection logic below decides. A fenced
+    # prompt echo is then simply one more candidate -- and it loses to a
+    # longer real plan, or loses to the ambiguity refusal, both of which are
+    # correct outcomes.
     valid: List[List[Dict[str, Any]]] = []
+    partial: List[Dict[str, Any]] = []
     last_err: Optional[Exception] = None
     for candidate in _array_spans(text):
         try:
             parsed = json.loads(_auto_escape_controls_in_strings(candidate))
             if isinstance(parsed, list) and parsed:
-                validated = validate(parsed)
-                valid.append(validated)  # an empty valid list is useless — skip
-        except PlanValidationError as exc:
-            last_err = exc
+                result = validate_partial(parsed)
+                if result["clean"]:
+                    # Remember any salvage so a candidate that is MOSTLY bad
+                    # can still be reported rather than silently vanishing.
+                    if not result["ok"]:
+                        partial.append(
+                            {
+                                "actions": result["clean"],
+                                "dropped": result["dropped"],
+                            }
+                        )
+                    valid.append(result["clean"])
         except json.JSONDecodeError as exc:
             last_err = exc
+    def _finish(chosen: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Return a salvaged plan, annotating any action that was dropped.
+
+        A salvaged plan must be honest about being salvaged. The dropped
+        action is not merely absent: the model's intent for that entry was
+        never carried out, and an operator reading only the executed plan
+        would assume every proposed action ran. So each surviving action
+        gets the reason it lost its neighbours, and the log records it.
+        """
+        for entry in partial:
+            if entry["actions"] is chosen or entry["actions"] == chosen:
+                for a in chosen:
+                    a["_dropped_actions"] = list(entry["dropped"])
+                _log.warning(
+                    "Cerveau plan partially invalid: kept %d action(s), "
+                    "dropped %d: %s",
+                    len(chosen),
+                    len(entry["dropped"]),
+                    "; ".join(entry["dropped"]),
+                )
+                break
+        return chosen
+
     if valid:
         # Ambiguity is a refusal, not a coin flip. A reply can contain more
         # than one well-formed action array: the real plan plus a recap, or
@@ -190,12 +289,12 @@ def parse_plan(raw: str) -> List[Dict[str, Any]]:
         # candidates are not obviously the same plan, refuse and let the
         # deterministic fallback run rather than guess.
         if len(valid) == 1:
-            return valid[0]
+            return _finish(valid[0])
         # Prefer a strictly longer plan: the real plan always covers at least
         # as many entries as a recap of it.
         by_len = sorted(valid, key=len, reverse=True)
         if len(by_len[0]) > len(by_len[1]):
-            return by_len[0]
+            return _finish(by_len[0])
         # Equal length, so length cannot break the tie. Deduplicate first: a
         # reply often restates the SAME plan verbatim, and those are not a
         # conflict.
@@ -206,7 +305,7 @@ def parse_plan(raw: str) -> List[Dict[str, Any]]:
                 seen.add(key)
                 distinct.append(cand)
         if len(distinct) == 1:
-            return distinct[0]
+            return _finish(distinct[0])
         # Genuinely ambiguous (equal length, different content) — do not pick.
         raise PlanValidationError(
             f"Ambiguous Cerveau reply: {len(distinct)} distinct action arrays of "
@@ -252,12 +351,21 @@ def _auto_escape_controls_in_strings(s: str) -> str:
     return "".join(out)
 
 
-def validate(actions: List[Any]) -> List[Dict[str, Any]]:
-    """Validate a list of action dicts; raises on contract violations."""
+def validate(
+    actions: List[Any], _seen: Optional[set] = None
+) -> List[Dict[str, Any]]:
+    """Validate a list of action dicts; raises on contract violations.
+
+    ``_seen`` carries the (target, index) keys already claimed by earlier
+    actions. ``validate_partial`` passes one set across every action so the
+    "one mutating action per entry" rule is still enforced over the WHOLE
+    plan rather than restarting per action. It is private: the one-mutating-
+    action rule must not be satisfiable by calling this per action.
+    """
     if not isinstance(actions, list):
         raise PlanValidationError("Plan must be a JSON array of actions.")
     out: List[Dict[str, Any]] = []
-    seen_touched: set = set()
+    seen_touched: set = set() if _seen is None else _seen
     for n, a in enumerate(actions):
         if not isinstance(a, dict):
             raise PlanValidationError(f"Action #{n} is not an object.")
@@ -421,10 +529,21 @@ def render_report(
     *,
     usage_before: Dict[str, Any],
     run_id: str,
+    fallback_note: str = "",
 ) -> str:
-    """Render a human-readable report (English-only) for review/audit."""
+    """Render a human-readable report (English-only) for review/audit.
+
+    ``fallback_note`` is prepended as a WARNING when Cerveau was not
+    consulted (C2). It is a parameter rather than something derived here so
+    the caller that actually knows whether the model was consulted is the
+    one that says so -- the report must never imply a model decision that
+    did not happen.
+    """
     lines: List[str] = []
     lines.append(f"# Memory triage report — {run_id}")
+    if fallback_note:
+        lines.append("")
+        lines.append(f"**{fallback_note}**")
     for t in usage_before.get("memory", []):
         lines.append(
             f"- {t['target']}: {t['current']:,}/{t['limit']:,} chars "
@@ -435,6 +554,21 @@ def render_report(
         lines.append("No actions required.")
         return "\n".join(lines)
     lines.append(f"{len(plan)} action(s):")
+    # A salvaged plan must SAY SO in the report an operator reads, not just
+    # in the log. The dropped action is the model's unfulfilled intent for
+    # that entry, and an operator who reads only this file would otherwise
+    # assume every proposed action ran. Report it once, above the list.
+    salvaged = [d for a in plan for d in (a.get("_dropped_actions") or [])]
+    if salvaged:
+        uniq = sorted(set(salvaged))
+        lines.append("")
+        lines.append(
+            f"WARNING: {len(uniq)} proposed action(s) were malformed and "
+            f"dropped; the {len(plan)} below are the rest. The entries they "
+            f"referenced were NOT acted on:"
+        )
+        for d in uniq:
+            lines.append(f"  - dropped {d}")
     for a in plan:
         kind = a["action"]
         target = a.get("target")

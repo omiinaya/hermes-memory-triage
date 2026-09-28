@@ -60,6 +60,18 @@ def cmd_status(cfg: Config) -> str:
         import time
 
         lines.append(f"Last triage: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(last))} UTC-epoch {last}")
+    # C2: a fallback run is a silent no-op. Surface a recent streak so
+    # "nothing changed" is never mistaken for "nothing needed changing".
+    fallbacks = state_mod.fallback_runs(cfg)
+    if fallbacks:
+        recent = fallbacks[-5:]
+        lines.append(
+            f"WARNING: Cerveau was not consulted on the last "
+            f"{len(recent)} run(s) — those were automatic no-ops, not "
+            f"decisions:"
+        )
+        for f in recent:
+            lines.append(f"  fallback run: {f['run_id']} at {f.get('at', '?')}")
     return "\n".join(lines)
 
 
