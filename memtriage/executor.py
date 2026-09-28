@@ -36,7 +36,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from . import ledger, locking, quarantine, snapshots, store as memory_store
+from . import inventory, ledger, locking, quarantine, snapshots, store as memory_store
 from .config import Config, _default_data_dir
 
 import logging
@@ -1011,14 +1011,33 @@ class Executor:
                         f"are revoked and the store is left as-is"
                     )
                     removals[target] = set()
-                    # The appends are KEPT here, not dropped. With the
-                    # removals revoked the store is already over its limit,
-                    # but these appends may carry a clause that exists
-                    # nowhere else (a split clause whose route failed), and
-                    # dropping them would lose it outright. The store being
-                    # over budget is the status quo we were handed; silently
-                    # deleting unique content to tidy it is not a trade the
-                    # plugin gets to make silently.
+                    # The appends are DROPPED here -- but only the ones that
+                    # REPLACE a source we have just agreed to keep. Provenance
+                    # is already recorded by `_add_append`: an append with
+                    # `sources` set is a replacement (a consolidate/split
+                    # merge), and an append with no sources is content that
+                    # exists NOWHERE ELSE -- a split clause whose route
+                    # failed. Dropping the first leaves source+replacement both
+                    # in the store and grows it past the limit, which is what
+                    # the 2026-09-28 17:45 auto run did (profile 3,000 ->
+                    # 4,771 chars, 159%, while reporting "appends dropped").
+                    # Dropping the second deletes unique text outright.
+                    #
+                    # A previous version of this comment kept ALL appends,
+                    # reasoning that "over budget is the status quo". That is
+                    # how the store got 59% over its limit. A previous version
+                    # of MY fix dropped all of them, which broke
+                    # test_a_retained_clause_survives_the_over_limit_guard --
+                    # correctly, because a split's retained clause is real.
+                    keep_unique = [
+                        (i, t) for i, (t, s) in enumerate(
+                            zip(appends[target], self._append_sources.get(target) or [])
+                        ) if not s
+                    ]
+                    if keep_unique:
+                        appends[target] = [t for _i, t in keep_unique]
+                    else:
+                        appends[target] = []
                     final = list(original[target]) + appends[target]
                 else:
                     appends[target] = []
@@ -1071,11 +1090,37 @@ class Executor:
                 # sum of removed lengths is not the saving — it ignores the
                 # append. Report the real net change in stored characters.
                 freed = memory_store.char_count(original[target]) - memory_store.char_count(final)
-                if freed:
+                if freed > 0:
                     self.applied.append(
                         f"freed {freed} chars [{target}] "
                         f"({memory_store.char_count(original[target])}"
                         f" -> {memory_store.char_count(final)})"
+                    )
+                elif (
+                    freed < 0
+                    and not self._provisional.get(target)
+                    and removals[target]
+                ):
+                    # `applied` is the channel the user reads to decide whether
+                    # the run helped. A NEGATIVE number here is not a saving --
+                    # the store grew -- and reporting "freed -4772 chars" as a
+                    # success is a lie in the same family as the D2 defect,
+                    # where `applied` claimed a removal a guard had revoked.
+                    #
+                    # Scoped to runs that left no provisional notes for this
+                    # target: a split whose routes failed has already said so
+                    # ("its clause stays in the store"), and a profile/keep
+                    # append that grew the store by a clause's worth of real
+                    # content is the feature, not a fault. What this targets
+                    # is the unexplained case -- a plan whose guards all
+                    # reported success and which still left the store bigger.
+                    self.add_error(
+                        f"target '{target}' GREW by "
+                        f"{-freed:,} chars "
+                        f"({memory_store.char_count(original[target]):,}"
+                        f" -> {memory_store.char_count(final):,}) -- "
+                        f"applying this plan increases the store, so it is "
+                        f"not reported as freed"
                     )
                 # This target's removal notes are now true: the store was
                 # rewritten. Notes for OTHER targets stay provisional until
@@ -1284,17 +1329,60 @@ class Executor:
         # Refuse to merge on a TRUNCATED base: the action's text may be the
         # inventory's 160-char cap, and writing that back as the merged entry
         # would silently discard the rest with no quarantine record.
-        capped = any(
-            (e.get("chars") or 0) > len(e.get("text") or "")
-            for e in (a.get("_source_entries") or [])
-        )
-        if capped and len(merged) < max(
-            (e.get("chars") or 0) for e in a["_source_entries"]
-        ):
-            raise ValueError(
-                "consolidate text is a truncated inventory copy; refusing to "
-                "merge (would silently discard the rest of the entries)"
-            )
+        #
+        # THE SOURCE OF TRUTH IS THE LIVE ENTRY, not the action. This used to
+        # read `a["_source_entries"]`, a key nothing in production ever wrote
+        # -- only a test constructed it by hand -- so the guard could not fire.
+        #
+        # WHICH TARGET. inventory._cap_entry_text caps MEMORY entries at 160
+        # chars and deliberately does NOT cap the profile (inventory.py:104,
+        # `cap = None if target == TARGET_USER else 160`), so a profile merge
+        # was never working from a truncated copy. The loss this guard is for
+        # only happens on a target the model saw truncated. A merge shorter
+        # than its sources is perfectly legitimate -- that is what merging is
+        # -- so a size ratio alone would refuse good plans.
+        # A merge is only ever as good as what the model was shown. For the
+        # MEMORY store the inventory caps each entry at 160 chars
+        # (inventory._cap_entry_text); the profile is deliberately not capped.
+        # So a memory merge that comes back SHORTER than the cap of a source
+        # entry cannot be holding even the text it was shown, let alone the
+        # rest.
+        #
+        # This guard previously read `a["_source_entries"]` -- a key nothing
+        # in production ever wrote, only a test built by hand -- so it could
+        # never fire. Three replacement rules were tried and rejected because
+        # each refused legitimate merges: a ratio against the true source
+        # size (two 12-char entries -> an 11-char merge IS the feature), the
+        # same ratio against the capped view, and word overlap ("merged fact"
+        # shares no words with its sources). Comparing against the CAP is the
+        # one that holds: it fires only when the result is smaller than the
+        # truncated view the model was given.
+        if target == memory_store.TARGET_MEMORY:
+            sources = [entries[i] for i in idxs]
+            # Ask the inventory what it ACTUALLY showed the model, rather than
+            # assuming a constant cap. `_cap_entry_text` returns
+            # `text[:160].rsplit(" ", 1)[0] + " …[truncated]"`.
+            #
+            # When no source was truncated this guard has nothing to say: a
+            # short merge of two short entries ("old fact one", "old fact two"
+            # -> "merged fact") is the feature working, and three earlier
+            # unscoped rules all refused it. So it only applies once the
+            # model was shown less than the truth.
+            #
+            # In that case a merge SHORTER than a real source cannot be
+            # holding it, and merging would silently discard the remainder.
+            if any(inventory._cap_entry_text(s) != s for s in sources):
+                longest = max(len(s) for s in sources)
+                if len(merged) < longest:
+                    raise ValueError(
+                        f"consolidate text ({len(merged)} chars) is shorter "
+                        f"than a source entry ({longest} chars) that the "
+                        f"inventory showed the model only in truncated form; "
+                        f"refusing to merge (the merge would be a summary of "
+                        f"the truncated copy, silently discarding the rest). "
+                        f"Raise the inventory cap or supply the full merged "
+                        f"text."
+                    )
         removals[target].update(idxs)
         for i in idxs:
             expected[(target, i)] = entries[i]
