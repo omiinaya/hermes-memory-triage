@@ -413,7 +413,8 @@ class Executor:
         # Removal notes per target, committed only when that target's store
         # is actually rewritten. Keyed by target because the rebuild loop
         # handles each target independently.
-        self._provisional: Dict[str, List[str]] = {}
+        # (index, message). index -1 = a note not tied to one entry.
+        self._provisional: Dict[str, List[tuple]] = {}
         # Pre-write snapshot paths taken this run, surfaced in the summary so
         # a user can undo the whole run from the report.
         self._snapshot_records: List[Dict[str, Any]] = []
@@ -621,7 +622,7 @@ class Executor:
         self.decisions.append(entry)
         _log_decision(self._run_id, level, msg, entry.get("action"), self.cfg)
 
-    def _note_removal(self, target: str, msg: str) -> None:
+    def _note_removal(self, target: str, msg: str, index: int = -1) -> None:
         """Narrate a REMOVAL, which a later guard can still revoke.
 
         A routing action has already written its skill/provider/script by the
@@ -630,8 +631,20 @@ class Executor:
         all run AFTER the action, so an eviction that is later refused must
         not appear in `applied` — doing so reported "quarantined 2990 chars"
         for a run that wrote nothing.
+
+        KEYED BY INDEX. The per-target drain at the write site promoted every
+        note for a target at once, so when the identity guard revoked index 0
+        its note still rode along with its siblings and the run claimed to
+        have quarantined an entry it had explicitly kept. That text was then
+        in neither the store nor the quarantine file — unrecoverable, and
+        reported as a success. Reproduced 2026-09-28:
+
+            removals CLAIMED in applied : 3  ['quarantined 89 chars', ...]
+            records in quarantine.jsonl : 2
+            entries ACTUALLY removed    : 2
+            errors: ['action would remove identity entry #0 ... kept']
         """
-        self._provisional.setdefault(target, []).append(msg)
+        self._provisional.setdefault(target, []).append((index, msg))
 
     def _note_pending(self, msg: str) -> None:
         self.pending.append(msg)
@@ -1068,13 +1081,26 @@ class Executor:
                 # rewritten. Notes for OTHER targets stay provisional until
                 # those targets are handled, so a guard that revokes one
                 # target's removal never launders another target's success.
-                self.applied.extend(self._provisional.pop(target, []))
+                #
+                # PER INDEX, not per target. `removals[target]` is what
+                # actually left the store, so only notes for indices in it
+                # are true. Promoting the whole list claimed a quarantined
+                # entry for one the identity guard explicitly kept.
+                removed = set(removals[target])
+                notes = self._provisional.pop(target, [])
+                still = [(i, m) for (i, m) in notes if i in removed]
+                revoked = [(i, m) for (i, m) in notes if i not in removed and i >= 0]
+                self.applied.extend(m for _i, m in still)
+                for i, m in revoked:
+                    self.add_error(
+                        f"planned but not committed ({target} #{i}): {m}"
+                    )
 
         # Removal notes still provisional belong to targets whose store was
         # never rewritten (a guard revoked the removal, or final ==
         # original). Report them as not-committed, never as a success.
         for _t, msgs in self._provisional.items():
-            for m in msgs:
+            for _i, m in msgs:
                 self.add_error(f"planned but not committed ({_t}): {m}")
         self._provisional = {}
 
@@ -1558,6 +1584,7 @@ class Executor:
             target,
             f"split {target}#{index} ({len(source_text)} chars) → kept "
             f"{len(keep_text)} chars, routed {len(routed)} clause(s)",
+            index=index,
         )
         self._ledger(
             "split", f"{target}#split#{self._run_id}", keep_text[:80]
@@ -1658,4 +1685,8 @@ class Executor:
         stated = a.get("text")
         if isinstance(stated, str) and stated:
             expected[(target, idx)] = stated
-        self._note_removal(target, f"quarantined {len(victim_text)} chars [{target}]")
+        self._note_removal(
+            target,
+            f"quarantined {len(victim_text)} chars [{target}]",
+            index=idx,
+        )
