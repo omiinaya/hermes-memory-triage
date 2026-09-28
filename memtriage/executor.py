@@ -461,7 +461,7 @@ class Executor:
             os.replace(tmp, dest)
             return dest
         except (OSError, ValueError) as exc:  # noqa: BLE001
-            self.errors.append(
+            self.add_error(
                 f"pre-write snapshot FAILED for {path}: {exc}; this write is "
                 f"not byte-recoverable if a guard revokes it"
             )
@@ -554,12 +554,29 @@ class Executor:
                 shutil.copy2(snap, path)
                 undone.append(f"restored {tok['kind']} {path} from snapshot")
             except OSError as exc:  # noqa: BLE001
-                self.errors.append(
+                self.add_error(
                     f"could not undo {tok['kind']} {path}: {exc}; it stays "
                     f"written and its source entry is still in place"
                 )
             tok["undone"] = True
         return undone
+
+    # -- errors -----------------------------------------------------------
+
+    def add_error(self, msg: str) -> None:
+        """Record a refusal/error AND log it at the same moment.
+
+        Every guard refusal funnels here (23 call sites), and none of them
+        reached the decision log until this existed: a run where the floor
+        revoked the entire plan produced a log full of `applied` lines and
+        no hint that anything was refused, which reads exactly like a clean
+        success. `self.errors` is still the list callers inspect -- this
+        appends to it rather than replacing it, so nothing that read
+        `self.errors.append(...)` directly needs changing, and a future
+        guard cannot forget the log by accident.
+        """
+        self.errors.append(msg)
+        _log_decision(self._run_id, "blocked", msg, cfg=self.cfg)
 
     def _note(self, msg: str) -> None:
         self.applied.append(msg)
@@ -584,7 +601,7 @@ class Executor:
         elif level == "pending":
             self.pending.append(msg)
         elif level == "error":
-            self.errors.append(msg)
+            self.add_error(msg)
         # "keep" is a decision to NOT act. It belongs in the log and in
         # `decisions`, never in applied/pending/errors -- a keep wrote
         # nothing, so listing it as applied would be a false claim.
@@ -665,7 +682,7 @@ class Executor:
         ctx = locking.store_lock(memory_store.path_for(memory_store.TARGET_USER))
         acquired = ctx.__enter__()
         if not acquired:
-            self.errors.append(
+            self.add_error(
                 "could not acquire the memory-store lock within the timeout; "
                 "another writer is active. Proceeding — verify the result."
             )
@@ -740,7 +757,7 @@ class Executor:
             try:
                 self._apply(action, original, removals, appends, expected)
             except Exception as exc:  # noqa: BLE001
-                self.errors.append(
+                self.add_error(
                     f"action #{n} ({action.get('action')}): {exc}"
                 )
 
@@ -771,7 +788,7 @@ class Executor:
                     continue
                 if not (0 <= i < len(original[target])):
                     removals[target].discard(i)
-                    self.errors.append(
+                    self.add_error(
                         f"removal {target}#{i} out of range — dropped from plan"
                     )
                 elif original[target][i] != want:
@@ -780,7 +797,7 @@ class Executor:
                     # write, or an earlier run of this same plan). Refuse
                     # rather than delete an unrelated entry.
                     removals[target].discard(i)
-                    self.errors.append(
+                    self.add_error(
                         f"removal {target}#{i} is stale — that index now holds a "
                         f"different entry; refusing to delete it"
                     )
@@ -791,7 +808,7 @@ class Executor:
                     # to index blindly and crash the whole rebuild.
                     if not (0 <= i < len(original[target])):
                         removals[target].discard(i)
-                        self.errors.append(
+                        self.add_error(
                             f"removal {target}#{i} out of range — dropped from plan"
                         )
                         continue
@@ -823,7 +840,7 @@ class Executor:
                                 "'split' action (keep=<core>, routes=[...])"
                             ),
                         })
-                        self.errors.append(
+                        self.add_error(
                             f"action would remove identity entry #{i} "
                             f"(identity/doctrine markers) — refused; kept"
                         )
@@ -846,7 +863,7 @@ class Executor:
             # float comparison that rejected 10.0% vs 10% would refuse the
             # very split that relieves a store pinned at its wall.
             if removals[target] and limit and post_fraction < floor - 1e-9:
-                self.errors.append(
+                self.add_error(
                     f"target '{target}' would drop to "
                     f"{post_chars}/{limit} chars ({post_fraction*100:.0f}%) "
                     f"< {floor*100:.0f}% floor — refused; source entries kept"
@@ -862,7 +879,7 @@ class Executor:
                     target, appends[target], original[target]
                 )
                 if dropped:
-                    self.errors.append(
+                    self.add_error(
                         f"withdrew {dropped} replacement entr"
                         f"{'y' if dropped == 1 else 'ies'} for '{target}': "
                         f"their source entries were kept, so the merged text "
@@ -873,7 +890,7 @@ class Executor:
                 # go back.
                 undone = self._undo_routes(target)
                 if undone:
-                    self.errors.append(
+                    self.add_error(
                         f"undid {len(undone)} route write(s) for '{target}' "
                         f"whose source entries were kept: "
                         + "; ".join(undone)
@@ -908,7 +925,7 @@ class Executor:
                 else:
                     keeper = min(sizes, key=lambda i: sizes[i])
                     n_all = len(removals[target])
-                    self.errors.append(
+                    self.add_error(
                         f"target 'memory' would be emptied entirely — kept "
                         f"its smallest entry #{keeper} ({sizes[keeper]} chars) "
                         f"and honoured the other {n_all - 1} removal(s) "
@@ -919,7 +936,7 @@ class Executor:
                     # Only the writes whose source is now STAYING get undone.
                     undone = self._undo_routes(target, only_index={keeper})
                     if undone:
-                        self.errors.append(
+                        self.add_error(
                             f"undid {len(undone)} route write(s) for "
                             f"'memory' whose source entry was kept: "
                             + "; ".join(undone)
@@ -938,7 +955,7 @@ class Executor:
             # Do not push a target PAST its own limit — once over, every
             # built-in `append` is refused for the rest of the session.
             if limit and memory_store.char_count(final) > limit and appends[target]:
-                self.errors.append(
+                self.add_error(
                     f"target '{target}' would exceed its {limit:,}-char limit "
                     f"({memory_store.char_count(final):,} with appends) — "
                     f"appends dropped, removals kept"
@@ -959,7 +976,7 @@ class Executor:
                 # when any removal depends on an append, revoke the removal
                 # and keep the store as it is.
                 if self._appends_back_removals(target, removals[target]):
-                    self.errors.append(
+                    self.add_error(
                         f"target '{target}' is over its {limit:,}-char limit; "
                         f"dropping the replacement text would have deleted "
                         f"the source without preserving it, so the removals "
@@ -999,7 +1016,7 @@ class Executor:
                     # Not fatal: the write is still atomic and reversible by
                     # quarantine. But it must be visible, because it means a
                     # botched write would be unrecoverable.
-                    self.errors.append(
+                    self.add_error(
                         f"pre-write snapshot FAILED for {target} "
                         f"({snap.get('reason')}); this write is not "
                         f"byte-recoverable if it lands wrong"
@@ -1009,7 +1026,7 @@ class Executor:
                 except OSError as exc:
                     # One target failing must not abort the other or lose the
                     # record of what already committed.
-                    self.errors.append(
+                    self.add_error(
                         f"writing target '{target}' failed: "
                         f"{type(exc).__name__}: {exc}"
                     )
@@ -1043,7 +1060,7 @@ class Executor:
         # original). Report them as not-committed, never as a success.
         for _t, msgs in self._provisional.items():
             for m in msgs:
-                self.errors.append(f"planned but not committed ({_t}): {m}")
+                self.add_error(f"planned but not committed ({_t}): {m}")
         self._provisional = {}
 
         # Quarantine is flushed ONLY for removals that survived every guard and
@@ -1056,7 +1073,7 @@ class Executor:
                     reason=f"removed by run {self._run_id}", run_id=self._run_id,
                 )
             except OSError as exc:
-                self.errors.append(
+                self.add_error(
                     f"quarantine write failed for {q_target}: {exc}"
                 )
         self._pending_quarantine = []
@@ -1066,7 +1083,7 @@ class Executor:
         try:
             _mark_applied(self.cfg, self._run_id)
         except OSError as exc:
-            self.errors.append(f"could not record run id for replay safety: {exc}")
+            self.add_error(f"could not record run id for replay safety: {exc}")
 
         after = _usage_snapshot()
         return {
@@ -1362,7 +1379,7 @@ class Executor:
         if memory_store.char_count(
             memory_store.read_entries_strict(memory_store.TARGET_USER)
         ) >= memory_store.char_limit(memory_store.TARGET_USER):
-            self.errors.append(
+            self.add_error(
                 "route-to-profile skipped: target 'user' is already at/over its "
                 "char limit; routing into it would worsen the pressure"
             )
@@ -1500,7 +1517,7 @@ class Executor:
                 clause = (r.get("text") or r.get("body") or "").strip()
                 if clause:
                     retained.append(clause)
-                self.errors.append(
+                self.add_error(
                     f"split route {r.get('action')!r} failed ({exc}); its "
                     f"clause stays in the store"
                 )
