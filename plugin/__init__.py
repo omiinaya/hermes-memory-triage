@@ -203,7 +203,22 @@ def _maybe_run_triage(reason: str) -> None:
         return
     if state.awaiting_approval(cfg):
         # A plan is already queued for review — never stomp it with a fresh one.
-        return
+        #
+        # But it must not block FOREVER. Nothing removed this key:
+        # `clear_awaiting()` had zero call sites, so a single unapproved plan
+        # wedged auto mode permanently and the store sat over budget while
+        # the plugin reported nothing. Expire on the cooldown window and say so.
+        if state.awaiting_approval_expired(cfg):
+            stale = state.awaiting_approval(cfg)
+            state.clear_awaiting(cfg)
+            logger.info(
+                "memtriage: plan %s sat unreviewed past the %d-minute window; "
+                "expiring it so auto-triage can run again (its plan file is "
+                "kept in reports/ and can still be reviewed by hand)",
+                stale, cfg.cooldown_minutes,
+            )
+        else:
+            return
     if not _auto_run_allowed():
         return
 

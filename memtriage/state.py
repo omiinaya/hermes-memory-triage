@@ -52,8 +52,43 @@ def mark_awaiting_approval(cfg: Config, run_id: str) -> None:
         if pending and pending != run_id:
             return None
         state["awaiting_approval"] = run_id
+        # When it was raised, so it can EXPIRE. Without this a single
+        # unapproved plan wedged auto mode permanently: the hook skips
+        # whenever `awaiting_approval` is set, `clear_awaiting()` had zero
+        # call sites in the codebase, and nothing else ever removed the key.
+        # The store stayed over budget with the plugin reporting nothing.
+        state["awaiting_approval_at"] = time.time()
         return state
     _update(cfg, mutate)
+
+
+def awaiting_approval_expired(
+    cfg: Config, max_age_minutes: Optional[int] = None, now: Optional[float] = None
+) -> bool:
+    """True when a pending plan has sat unreviewed past the staleness window.
+
+    The window defaults to the cooldown, so an unattended run retries at
+    roughly the cadence it would have used anyway. Expiry does NOT delete the
+    plan or discard it silently: :func:`clear_awaiting` is called by the
+    caller, which also reports it, so the wedge is visible rather than
+    merely gone.
+
+    A pending plan with NO timestamp is treated as expired: it predates this
+    bookkeeping (or was written by hand), and a plan nobody can date is
+    exactly the case where silently keeping the brake on forever is wrong.
+    """
+    if awaiting_approval(cfg) is None:
+        return False
+    if max_age_minutes is None:
+        max_age_minutes = cfg.cooldown_minutes
+    if max_age_minutes <= 0:
+        return False
+    st = _load(cfg)
+    set_at = st.get("awaiting_approval_at")
+    if set_at is None:
+        return True
+    now = time.time() if now is None else now
+    return (now - float(set_at)) >= max_age_minutes * 60
 
 
 def awaiting_approval(cfg: Config) -> Optional[str]:
