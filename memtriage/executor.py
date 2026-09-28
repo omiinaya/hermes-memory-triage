@@ -334,6 +334,13 @@ def _usage_snapshot() -> Dict[str, Dict[str, Any]]:
 
 DECISION_LOG_NAME = "decisions.jsonl"
 
+# The user-profile safety floor: refuse any removal set that would leave the
+# profile below this fraction of its char limit. A module constant, not a
+# function-local, so a test can lower it and reach the guards layered behind
+# it -- the empty-store backstop in _execute_locked is unreachable while the
+# floor fires first, so without this it could never be tested at all.
+USER_MIN_FRACTION = 0.10
+
 
 def _log_decision(
     run_id: str,
@@ -807,7 +814,9 @@ class Executor:
         # emptied (post==0) but even then the refusal keeps entries safe.
         # For user: refuse any removal that would drop it below 10% of limit.
         # For memory: refuse only a complete empty (post == 0).
-        USER_MIN_FRACTION = 0.10
+        # (USER_MIN_FRACTION is a module constant so a test can lower it and
+        # reach the guards BEHIND this one; as a function-local it made the
+        # empty-store backstop unreachable from any test.)
         # IDENTITY GUARD: a "user" entry carrying identity/doctrine markers can
         # NEVER be routed away or evicted, even if siblings keep the store above
         # the floor. The model legitimately tries to demote the giant
@@ -1055,38 +1064,62 @@ class Executor:
                         if i not in removals[target]
                     ]
             if final != original[target]:
-                # PRE-WRITE SNAPSHOT. Quarantine covers entries this plan
-                # removed; it does NOT cover the file this write replaces. The
-                # guards above have all passed, so this is the last moment
-                # before the live store is overwritten — and the content is
-                # final. A live incident on 2026-09-27 was a correct atomic
-                # write of WRONG content, which quarantine could not help
-                # with; this makes that a one-command restore.
-                snap = snapshots.take(
-                    self.cfg.data_dir, target, self._run_id,
-                    keep=self.cfg.retain_snapshots,
-                )
-                if snap and snap.get("ok"):
-                    self._snapshot_records.append(snap)
-                elif snap and snap.get("existed"):
-                    # Not fatal: the write is still atomic and reversible by
-                    # quarantine. But it must be visible, because it means a
-                    # botched write would be unrecoverable.
+                # C5 (2026-09-28): refuse to EMPTY a store that had content.
+                # The memory floor above already keeps one entry, but that
+                # floor is keyed to 'memory' and to a specific plan shape.
+                # This is the unconditional last line before the write: if
+                # the rebuild produced zero entries from a non-empty store,
+                # something upstream is wrong, and committing it would
+                # destroy the store with only quarantine as a way back.
+                # An already-empty store is not this case and is fine.
+                if not final and original[target]:
                     self.add_error(
-                        f"pre-write snapshot FAILED for {target} "
-                        f"({snap.get('reason')}); this write is not "
-                        f"byte-recoverable if it lands wrong"
+                        f"refusing to empty target '{target}': the rebuild "
+                        f"produced 0 entries from {len(original[target])}, "
+                        f"which is never a legitimate outcome. The store is "
+                        f"left unchanged."
                     )
-                try:
-                    memory_store.write_entries(target, final)
-                except OSError as exc:
-                    # One target failing must not abort the other or lose the
-                    # record of what already committed.
-                    self.add_error(
-                        f"writing target '{target}' failed: "
-                        f"{type(exc).__name__}: {exc}"
+                    removals[target] = set()
+                    final = list(original[target])
+                else:
+                    # PRE-WRITE SNAPSHOT. Quarantine covers entries this plan
+                    # removed; it does NOT cover the file this write replaces. The
+                    # guards above have all passed, so this is the last moment
+                    # before the live store is overwritten — and the content is
+                    # final. A live incident on 2026-09-27 was a correct atomic
+                    # write of WRONG content, which quarantine could not help
+                    # with; this makes that a one-command restore.
+                    snap = snapshots.take(
+                        self.cfg.data_dir, target, self._run_id,
+                        keep=self.cfg.retain_snapshots,
                     )
-                    continue
+                    if snap and snap.get("ok"):
+                        self._snapshot_records.append(snap)
+                    elif snap and snap.get("existed"):
+                        # Not fatal: the write is still atomic and reversible by
+                        # quarantine. But it must be visible, because it means a
+                        # botched write would be unrecoverable.
+                        self.add_error(
+                            f"pre-write snapshot FAILED for {target} "
+                            f"({snap.get('reason')}); this write is not "
+                            f"byte-recoverable if it lands wrong"
+                        )
+                    wrote = True
+                    try:
+                        memory_store.write_entries(target, final)
+                    except OSError as exc:
+                        wrote = False
+                        # One target failing must not abort the other or lose
+                        # the record of what already committed.
+                        self.add_error(
+                            f"writing target '{target}' failed: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                    if not wrote:
+                        # The store on disk still holds the originals, so
+                        # quarantining the removals would record a restore
+                        # source for entries that were never taken out.
+                        continue
                 # Quarantine is flushed only for removals that SURVIVED every
                 # guard, so a refused eviction never leaves a phantom record
                 # that `restore` would later duplicate.

@@ -21,6 +21,7 @@ STATE_FILENAME = "state.json"
 QUARANTINE_DIRNAME = "quarantine"
 REPORTS_DIRNAME = "reports"
 SKILLS_DIRNAME = "skills"
+SCRIPTS_DIRNAME = "scripts"
 
 DEFAULT_THRESHOLD_PERCENT = 0.75
 DEFAULT_QUARANTINE_DAYS = 7
@@ -107,8 +108,30 @@ class Config:
 
     @property
     def scripts_root(self) -> Path:
-        """Resolved scripts directory (where routed scripts are written)."""
-        return Path(os.path.expanduser(self.scripts_dir))
+        """Resolved scripts directory (where routed scripts are written).
+
+        C3 (2026-09-28). This read ``scripts_dir`` and nothing else, so a
+        default config resolved to the LIVE ``~/.hermes/scripts`` regardless
+        of ``HERMES_HOME``. ``skills_root`` has always derived from
+        ``HERMES_HOME``; scripts did not, and the asymmetry meant the test
+        fixture's isolation was only half real. Verified in
+        scratch/chk_scripts_leak.py: under the full fixture ``scripts_root``
+        was the live tree (951 entries), so any test containing a
+        ``route-to-script`` planted a real file in the real scripts
+        directory.
+
+        The rule now mirrors ``skills_root_raw``: an EXPLICIT
+        ``scripts_dir`` still wins (a deployment that genuinely puts scripts
+        elsewhere must keep working), but the default follows
+        ``HERMES_HOME`` so an isolated home is actually isolated.
+        """
+        raw = self.scripts_dir
+        if raw == DEFAULT_SCRIPTS_DIR:
+            hermes_home = os.environ.get("HERMES_HOME") or os.path.expanduser(
+                "~/.hermes"
+            )
+            return Path(hermes_home) / SCRIPTS_DIRNAME
+        return Path(os.path.expanduser(raw))
 
     @property
     def skills_root_raw(self) -> str:

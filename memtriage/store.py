@@ -22,6 +22,9 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
+# atomicio imports nothing from this package, so this cannot cycle.
+from .atomicio import unique_tmp
+
 try:  # pragma: no cover - platform probe
     import fcntl
 except ImportError:  # pragma: no cover - Windows
@@ -180,14 +183,39 @@ def read_entries_strict(target: str) -> List[str]:
 
 
 def write_entries(target: str, entries: List[str]) -> None:
-    """Replace the target file's entries, under lock, atomically."""
+    """Replace the target file's entries, under lock, atomically.
+
+    C5 (2026-09-28). The temp file was a FIXED name (``<path>.tmp``).
+    ``file_lock`` is re-entrant per thread, so a second PROCESS writing the
+    same store would share that temp path -- one writer's ``os.replace``
+    renames the file the other is still writing, and the loser's content is
+    silently discarded. ``atomicio.unique_tmp`` already solved exactly this
+    and its docstring calls the bug measured-and-fixed; this call site was
+    simply never converted. Temp names are now private per process AND
+    thread.
+
+    Note there is deliberately NO guard here against an empty list:
+    writing an empty store is a legitimate primitive operation (tests seed
+    one, and a store can genuinely be empty). The hazard is the EXECUTOR
+    arriving at zero entries, which is a different question and is refused
+    there, in ``Executor._execute_locked``.
+    """
     path = path_for(target)
     path.parent.mkdir(parents=True, exist_ok=True)
     body = serialize_entries(entries)
     with file_lock(path):
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(body, encoding="utf-8")
-        os.replace(tmp, path)
+        tmp = unique_tmp(path)
+        try:
+            tmp.write_text(body, encoding="utf-8")
+            os.replace(tmp, path)
+        finally:
+            # A failed replace can leave the temp behind; the name is
+            # private to this process+thread, so removing it cannot destroy
+            # another writer's work.
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def usage(target: str) -> Dict[str, Any]:
